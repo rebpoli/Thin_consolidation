@@ -1,0 +1,45 @@
+FROM docker.io/dolfinx/dolfinx:stable
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    SINGTAG=FENICS
+
+# Install necessary build tools and dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    gfortran \
+    git \
+    wget \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    gfortran \
+    libomp-dev \    
+    liblapack-dev \
+    zlib1g-dev \
+    m4 \
+    automake \
+    libtool \
+    vim \
+    rsync \
+    eog \
+    exuberant-ctags \
+    binutils \
+    nsight-systems \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directory for installations
+WORKDIR /opt/src
+
+RUN pip3 install --no-cache-dir \
+    matplotlib \
+    scipy \
+    pandas \
+    jupyter \
+    jupyterlab
+
+
+CMD ["/bin/bash"]
+
