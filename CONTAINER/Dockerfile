@@ -28,18 +28,14 @@ RUN apt-get update && apt-get install -y \
     binutils \
     nsight-systems \
     pkg-config \
+    bash-completion \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directory for installations
-WORKDIR /opt/src
+# WORKDIR /opt/src
 
-RUN pip3 install --no-cache-dir \
-    matplotlib \
-    scipy \
-    pandas \
-    jupyter \
-    jupyterlab
-
+RUN pip install --no-cache-dir matplotlib scipy pandas pyvista 
+#meshio petsc4py fenics-dolfinx 
 
 CMD ["/bin/bash"]
 
