@@ -859,7 +859,7 @@ if __name__ == "__main__":
     # Geometry
     Re = 1.0          # Outer radius (m)
     H = 1.0           # Height (m)
-    N = 100       # Mesh size (m)
+    N = 10       # Mesh size (m)
     
     # Time parameters
     T_final = 1   # Final time (s)

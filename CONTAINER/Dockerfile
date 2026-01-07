@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     libomp-dev \    
     liblapack-dev \
     zlib1g-dev \
+    ffmpeg \
     m4 \
     automake \
     libtool \
@@ -34,7 +35,7 @@ RUN apt-get update && apt-get install -y \
 # Create directory for installations
 # WORKDIR /opt/src
 
-RUN pip install --no-cache-dir matplotlib scipy pandas pyvista 
+RUN pip install --no-cache-dir matplotlib scipy pandas pyvista h5py
 #meshio petsc4py fenics-dolfinx 
 
 CMD ["/bin/bash"]

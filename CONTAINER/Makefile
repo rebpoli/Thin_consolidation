@@ -17,8 +17,8 @@ build: .force
 	singularity build --force $(SIFFILE) docker-archive:$(TARFILE)
 
 install: .force
-	cp images/$(TAG).sif /opt/singularity/images
-	sudo chmod a+rx /opt/singularity/images/*
+	cp images/$(TAG).sif /opt/container/
+	sudo chmod a+rx /opt/container/bin/*
 
 # download:
 #     mkdir -p $(INSTALL_DIR)
