@@ -106,7 +106,7 @@ class NumericalCfg(BaseModel):
 
 
 class OutputCfg(BaseModel):
-    vtk_file:                   str = "outputs/results.vtk"
+    vtk_file:                   str = "outputs/results"
     fem_timeseries_file:        str = "outputs/fem_timeseries.nc"
     analytical_timeseries_file: str = "outputs/analytical_timeseries.nc"
     output_dir:                 str = "outputs"
@@ -124,6 +124,39 @@ class Config(BaseModel):
             with open(config_file) as f:
                 data = yaml.safe_load(f)
         super().__init__(**data)
+    
+    def summary(self):
+        lines = []
+        lines.append("="*70)
+        lines.append("CONFIGURATION SUMMARY")
+        lines.append("="*70)
+        lines.append(f"\nMesh:")
+        lines.append(f"  Re (radius) = {self.mesh.Re} m")
+        lines.append(f"  H (height)  = {self.mesh.H} m")
+        lines.append(f"  N (elements per dimension) = {self.mesh.N}")
+        lines.append(f"\nMaterial Properties:")
+        lines.append(f"  E (Young's modulus) = {self.materials.E:.3e} Pa")
+        lines.append(f"  nu (Poisson's ratio) = {self.materials.nu}")
+        lines.append(f"  alpha (Biot coefficient) = {self.materials.alpha}")
+        lines.append(f"  perm (permeability) = {self.materials.perm:.3e} m²")
+        lines.append(f"  visc (viscosity) = {self.materials.visc:.3e} Pa·s")
+        lines.append(f"  M (Biot modulus) = {self.materials.M:.3e} Pa")
+        lines.append(f"  sig0 (initial stress) = {self.materials.sig0:.3e} Pa")
+        lines.append(f"  mu (computed) = {self.materials.mu:.3e} Pa")
+        lines.append(f"  lambda (computed) = {self.materials.lmbda:.3e} Pa")
+        lines.append(f"\nNumerical Parameters:")
+        lines.append(f"  End time = {self.numerical.end_time} s")
+        lines.append(f"  Time steps = {self.numerical.num_steps}")
+        lines.append(f"  dt = {self.numerical.dt()} s")
+        lines.append(f"\nOutput:")
+        lines.append(f"  VTK file = {self.output.vtk_file}")
+        lines.append(f"  FEM timeseries = {self.output.fem_timeseries_file}")
+        lines.append(f"  Analytical timeseries = {self.output.analytical_timeseries_file}")
+        lines.append("="*70)
+        return "\n".join(lines)
+
+
+_instance = None
 
 
 def load(config_file: str = "config.yaml"):

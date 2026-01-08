@@ -13,6 +13,8 @@ class CylinderMesh:
         self.comm     = comm
         self.domain   = None
         self.facets   = None
+        
+        self.generate()
     
     def generate(self):
         self.domain, self.facets = self._create_gmsh_mesh()
