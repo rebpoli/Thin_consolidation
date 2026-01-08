@@ -51,11 +51,13 @@ class Analytical1DConsolidation:
         
         self._pressure_field = np.zeros((n_times, self.n_z))
         self._uz_field       = np.zeros((n_times, self.n_z))
+
+        H  = self.mesh_cfg.H
         
         for i_t, t in enumerate(self.times):
             for i_z, z in enumerate(self.z_coords):
-                self._pressure_field[i_t, i_z] = self._pressure(t, z)
-                self._uz_field[i_t, i_z]       = self._uz(t, z)
+                self._pressure_field[i_t, i_z] = self._pressure(t, H-z)
+                self._uz_field[i_t, i_z]       = self._uz(t, H-z)
         
         self._pressure_at_bottom = self._pressure_field[:, 0]
         self._uz_at_top          = self._uz_field[:, -1]

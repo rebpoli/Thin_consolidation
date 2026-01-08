@@ -160,3 +160,31 @@ class PoroelasticityFormulation:
     def _get_boundary_marker(self, surface):
         marker_map = {"bottom": 1, "right": 2, "top": 3, "left": 4}
         return marker_map[surface]
+    
+    def compute_stress_components(self, wh):
+        """
+        Compute total stress components from solution
+        
+        Returns:
+        --------
+        sigma_rr, sigma_zz, sigma_rz, von_mises : ufl expressions
+        """
+        u, p = ufl.split(wh)
+        
+        # Effective stress: σ' = λ*tr(ε)*I + 2μ*ε
+        sigma_eff = self.sigma_eff(u)
+        
+        # Total stress: σ = σ' - α*p*I
+        sigma_total = sigma_eff - self.alpha * p * ufl.Identity(3)
+        
+        # Extract components
+        sigma_rr = sigma_total[0, 0]
+        sigma_zz = sigma_total[2, 2]
+        sigma_rz = sigma_total[0, 2]
+        
+        # von Mises: √(3/2 * s:s) where s is deviatoric stress
+        sigma_mean = ufl.tr(sigma_total) / 3.0
+        s = sigma_total - sigma_mean * ufl.Identity(3)
+        von_mises = ufl.sqrt((3.0/2.0) * ufl.inner(s, s))
+        
+        return sigma_rr, sigma_zz, sigma_rz, von_mises

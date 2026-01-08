@@ -14,22 +14,21 @@ materials:
 
 boundary_conditions:
   bottom:
-    U_r: 0.0
     U_z: 0.0
-  
-  right:
-    U_r: 0.0
-  
+
   top:
     sig_zz: -1.0e5
     Pressure: 0.0
+  
+  right:
+    U_r: 0.0
   
   left:
     U_r: 0.0
 
 numerical:
   end_time: 1.0
-  num_steps: 20
+  num_steps: 1000
 
 output:
   vtk_file: "outputs/results.bp"
