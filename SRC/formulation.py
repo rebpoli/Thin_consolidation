@@ -13,6 +13,7 @@ class PoroelasticityFormulation:
         
         cfg = config.get()
         self.material_cfg = cfg.materials
+        self.numerical_cfg = cfg.numerical
         self.bc_cfg       = cfg.boundary_conditions
         
         self._define_kinematics()
@@ -51,6 +52,9 @@ class PoroelasticityFormulation:
         self.M     = fem.Constant(self.domain, self.material_cfg.M)
         self.mu    = fem.Constant(self.domain, self.material_cfg.mu)
         self.lmbda = fem.Constant(self.domain, self.material_cfg.lmbda)
+        self.theta = fem.Constant(self.domain, self.numerical_cfg.theta_cn) 
+        
+        print(f"✓ Time integration: Crank-Nicolson (θ={self.theta.value})")
     
     def weak_form(self, dt, wh_old):
         u, p = ufl.TrialFunctions(self.W)
@@ -60,63 +64,60 @@ class PoroelasticityFormulation:
         
         dt_const = fem.Constant(self.domain, dt)
         r = self.x[0]
+        theta = self.theta
         
         dx = ufl.Measure("dx", domain=self.domain)
         ds = ufl.Measure("ds", domain=self.domain, subdomain_data=self.facets)
         
-        # BILINEAR FORM (matching reference exactly)
+        # BILINEAR FORM (LHS)
         a = (
-            # Mechanical equilibrium
-            ufl.inner(self.sigma_eff(u), self.eps(v)) * r * dx
-            - self.alpha * p * self.eps_v(v) * r * dx
+            # Mechanical equilibrium: quasi-static, NO theta-weighting
+            # (instantaneous equilibrium at current timestep)
+            +  ufl.inner(self.sigma_eff(u), self.eps(v)) * r * dx
+            -  self.alpha * p * self.eps_v(v) * r * dx
             
-            # Flow equation with time derivative
+            # Flow equation: time derivatives + theta-weighted diffusion
             + self.alpha / dt_const * self.eps_v(u) * q * r * dx
-            + (self.perm / self.visc) * ufl.inner(ufl.grad(p), ufl.grad(q)) * r * dx
+            + theta * (self.perm / self.visc) * ufl.inner(ufl.grad(p), ufl.grad(q)) * r * dx
             + (1.0 / self.M) * p / dt_const * q * r * dx
         )
         
         # LINEAR FORM (RHS)
-        L_terms = []
-        
-        # Old volumetric strain terms
-        L_terms.append(self.alpha / dt_const * self.eps_v(u_old) * q * r * dx)
-        L_terms.append((1.0 / self.M) * p_old / dt_const * q * r * dx)
-        
-        # Neumann boundary conditions
-        L_neumann = self._apply_neumann_bcs(v, q, r, dx, ds)
-        
-        # Combine all terms
-        if L_terms:
-            L = sum(L_terms) + L_neumann
-        else:
-            L = L_neumann
+        L = (
+            # Flow equation: time derivatives + (1-theta)-weighted diffusion
+            + self.alpha / dt_const * self.eps_v(u_old) * q * r * dx
+            - (1 - theta) * (self.perm / self.visc) * ufl.inner(ufl.grad(p_old), ufl.grad(q)) * r * dx
+            + (1.0 / self.M) * p_old / dt_const * q * r * dx
+            
+            # Neumann boundary conditions
+            +  self._apply_neumann_bcs(v, q, r, dx, ds)
+        )
         
         return a, L
-    
+
+    #
+    # Collect all Neumann BC terms
     def _apply_neumann_bcs(self, v, q, r, dx, ds):
-        # Collect all Neumann BC terms
-        terms = []
+        
+        terms = [fem.Constant(self.domain, 0.0) * q * r * dx] ## Dummy to keep type consistency
+        n = ufl.FacetNormal(self.domain)
         
         for surface in ['bottom', 'right', 'top', 'left']:
             bc_spec = getattr(self.bc_cfg, surface)
             marker = self._get_boundary_marker(surface)
-            
-            # Build traction vector for this surface
-            traction_r = bc_spec.sig_rr if bc_spec.sig_rr is not None else 0.0
-            traction_z = bc_spec.sig_zz if bc_spec.sig_zz is not None else 0.0
-            
-            # Only add term if at least one traction component is non-zero
-            if traction_r != 0.0 or traction_z != 0.0:
-                traction = ufl.as_vector([traction_r, traction_z])
-                terms.append(ufl.inner(traction, v) * r * ds(marker))
-        
-        # Return sum of terms, or zero if no Neumann BCs
-        if terms:
-            return sum(terms)
-        else:
-            # No Neumann BCs - return zero constant
-            return fem.Constant(self.domain, 0.0) * q * r * dx
+
+            sig_rr = bc_spec.sig_rr if bc_spec.sig_rr is not None else 0.0
+            sig_zz = bc_spec.sig_zz if bc_spec.sig_zz is not None else 0.0
+            if sig_rr == 0.0 and sig_zz == 0.0: continue
+
+            # Apply normal
+            traction_r = sig_rr * n[0]
+            traction_z = sig_zz * n[1]
+
+            traction = ufl.as_vector([traction_r, traction_z])
+            terms.append(ufl.inner(traction, v) * r * ds(marker))
+
+        return sum(terms)
     
     def setup_boundary_conditions(self):
         bcs = []

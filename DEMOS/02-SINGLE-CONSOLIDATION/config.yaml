@@ -1,7 +1,7 @@
 mesh:
   Re: 1.0
   H: 1.0
-  N: 20
+  N: 10
 
 materials:
   E: 1.44e10
@@ -10,15 +10,14 @@ materials:
   perm: 1.9e-13
   visc: 1.0e-3
   M: 1.35e10
-  sig0: -1.0e5
 
 boundary_conditions:
-  bottom:
-    U_z: 0.0
-
-  top:
+  bottom: # z=0
     sig_zz: -1.0e5
     Pressure: 0.0
+
+  top:
+    U_z: 0.0
   
   right:
     U_r: 0.0
@@ -27,8 +26,12 @@ boundary_conditions:
     U_r: 0.0
 
 numerical:
-  end_time: 1.0
-  num_steps: 1000
+  end_time: 1
+  dt0   : 0.005
+  dtk   : 1.0001
+  dtmax : 0.005
+  num_steps: 100000
+  theta_cn: 1.0
 
 output:
   vtk_file: "outputs/results.bp"
