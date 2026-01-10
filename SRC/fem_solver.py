@@ -425,6 +425,8 @@ class PoroelasticitySolver:
         wh = self.wh
         uh, ph = wh.split()
         urh, uzh = uh.split()
+        sigma_rr_dg0, sigma_zz_dg0, sigma_rz_dg0 = self.stress_vector_out.split()
+
 
         # Setup export
         WRITE = { 
@@ -432,6 +434,9 @@ class PoroelasticitySolver:
                  'Ur'     : { 'space': Q_out, 'data': urh },
                  'Uz'     : { 'space': Q_out, 'data': uzh },
                  'P'      : { 'space': Q_out, 'data': ph },
+                 'sigma_rr': {'space': Q_out, 'data': sigma_rr_dg0},
+                 'sigma_zz': {'space': Q_out, 'data': sigma_zz_dg0},
+                 'sigma_rz': {'space': Q_out, 'data': sigma_rz_dg0},
                 }
 
         # Do the writing
