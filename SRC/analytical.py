@@ -21,8 +21,10 @@ class Analytical1DConsolidation:
         
         self.n_z     = n_spatial_points
         self.z_coords = np.linspace(0, self.mesh_cfg.H, self.n_z)
-        
+
         self._compute_derived_properties()
+        
+    def compute() :
         self._compute_history()
     
     def _compute_derived_properties(self):

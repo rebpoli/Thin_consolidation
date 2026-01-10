@@ -67,12 +67,13 @@ class BCCfg(BaseModel):
 
 
 class NumericalCfg(BaseModel):
-    dt0:   float     = Field(gt=0, description="Initial timestep time")
-    dtmax: float     = Field(gt=0, description="Maximum timestep time")
-    dtk:   float     = Field(gt=1, description="Geometric factor to increase dt")
-    end_time:  float = Field(gt=0, description="End time [s]")
-    num_steps: int   = Field(gt=1, description="Number of time steps")
-    theta_cn: float  = Field(gt=0, le=1, description="Crank-Nicholson theta (0:Explicit ; 0.5: C-N ; 1: Implicit)")
+#     dt0:   float     = Field(gt=0, description="Initial timestep time")
+#     dtmax: float     = Field(gt=0, description="Maximum timestep time")
+#     dtk:   float     = Field(gt=1, description="Geometric factor to increase dt")
+#     end_time:  float = Field(gt=0, description="End time [s]")
+    num_steps: int    = Field(gt=1, description="Number of time steps")
+    theta_cn: float   = Field(gt=0, le=1, description="Crank-Nicholson theta (0:Explicit ; 0.5: C-N ; 1: Implicit)", default=0.5)
+    end_time_s: float = Field(gt=0, description="End time t* (dimensionless)", default=0.25)
     
     _current_step: int  = 0
     _time_list:    list = None
@@ -85,18 +86,31 @@ class NumericalCfg(BaseModel):
         self._current_step = 0
         self._time_list    = [0.0]
 
-        self._expected_time_list = []
-        self._expected_dt_list = []
-        dt = self.dt0
-        time = 0.0
-        while time < self.end_time+dt:
-            dt = min(dt * self.dtk, self.dtmax)
-            time += dt
-            self._expected_time_list.append(time)
-            self._expected_dt_list.append(dt)
-        self._expected_time_list = np.array(self._expected_time_list)
-        self._expected_dt_list = np.array( self._expected_dt_list )
+#         self._expected_time_list = []
+#         self._expected_dt_list = []
+#         dt = self.dt0
+#         time = 0.0
+#         while time < self.end_time+dt:
+#             dt = min(dt * self.dtk, self.dtmax)
+#             time += dt
+#             self._expected_time_list.append(time)
+#             self._expected_dt_list.append(dt)
+#         self._expected_time_list = np.array(self._expected_time_list)
+#         self._expected_dt_list = np.array( self._expected_dt_list )
 
+    def setup_timesteps( self, config ) :
+        H = config.mesh.H
+        c_v = config.materials.c_v
+        ts1 = self.end_time_s
+        N = self.num_steps
+        dt_s = ts1/N
+        dt = 4*H*H/c_v * dt_s
+        t_end = 4*H*H/c_v * ts1
+        self._expected_time_list = np.linspace(0, t_end, N + 1)
+        self._expected_dt_list = np.full(N+1, dt)
+        
+#         self._expected_time_list = np.array(self._expected_time_list)
+#         self._expected_dt_list = np.array( self._expected_dt_list )
     
     def dt(self) -> float:
         return self._expected_dt_list[self._current_step]
@@ -150,6 +164,7 @@ class Config(BaseModel):
             with open(config_file) as f:
                 data = yaml.safe_load(f)
         super().__init__(**data)
+        self.numerical.setup_timesteps(self)
     
     def summary(self):
         lines = []
@@ -176,7 +191,7 @@ class Config(BaseModel):
         lines.append(f"  c_v (computed) = {self.materials.c_v:.3e}")
         lines.append(f"  eta (computed) = {self.materials.eta:.3e}")
         lines.append(f"\nNumerical Parameters:")
-        lines.append(f"  End time = {self.numerical.end_time} s")
+        lines.append(f"  End time* = {self.numerical.end_time_s} (dimensionless)")
         lines.append(f"  Time steps = {self.numerical.num_steps}")
         lines.append(f"  dt = {self.numerical.dt()} s")
         lines.append(f"\nOutput:")

@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python
+#!/usr/bin/env -S python -u
 
 import config
 from mesh_generator import CylinderMesh

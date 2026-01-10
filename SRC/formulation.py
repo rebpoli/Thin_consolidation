@@ -6,6 +6,8 @@ import config
 
 
 class PoroelasticityFormulation:
+    #
+    #
     def __init__(self, domain, function_space, facets):
         self.domain = domain
         self.W      = function_space
@@ -19,6 +21,8 @@ class PoroelasticityFormulation:
         self._define_kinematics()
         self._create_fem_constants()
     
+    #
+    #
     def _define_kinematics(self):
         x = ufl.SpatialCoordinate(self.domain)
         
@@ -45,6 +49,8 @@ class PoroelasticityFormulation:
         self.sigma_eff = sigma_eff
         self.x         = x
     
+    #
+    #
     def _create_fem_constants(self):
         self.alpha = fem.Constant(self.domain, self.material_cfg.alpha)
         self.perm  = fem.Constant(self.domain, self.material_cfg.perm)
@@ -56,6 +62,8 @@ class PoroelasticityFormulation:
         
         print(f"✓ Time integration: Crank-Nicolson (θ={self.theta.value})")
     
+    #
+    #
     def weak_form(self, dt, wh_old):
         u, p = ufl.TrialFunctions(self.W)
         v, q = ufl.TestFunctions(self.W)
@@ -119,6 +127,8 @@ class PoroelasticityFormulation:
 
         return sum(terms)
     
+    #
+    #
     def setup_boundary_conditions(self):
         bcs = []
         
@@ -140,6 +150,8 @@ class PoroelasticityFormulation:
         
         return bcs
     
+    #
+    #
     def _create_displacement_bc(self, component, value, marker):
         facet_indices = self.facets.find(marker)
         facet_dofs    = fem.locate_dofs_topological(
@@ -149,6 +161,8 @@ class PoroelasticityFormulation:
         )
         return fem.dirichletbc(value, facet_dofs, self.W.sub(0).sub(component))
     
+    #
+    #
     def _create_pressure_bc(self, value, marker):
         facet_indices = self.facets.find(marker)
         facet_dofs    = fem.locate_dofs_topological(
@@ -158,18 +172,15 @@ class PoroelasticityFormulation:
         )
         return fem.dirichletbc(value, facet_dofs, self.W.sub(1))
     
+    #
+    #
     def _get_boundary_marker(self, surface):
         marker_map = {"bottom": 1, "right": 2, "top": 3, "left": 4}
         return marker_map[surface]
     
+    #
+    #
     def compute_stress_components(self, wh):
-        """
-        Compute total stress components from solution
-        
-        Returns:
-        --------
-        sigma_rr, sigma_zz, sigma_rz, von_mises : ufl expressions
-        """
         u, p = ufl.split(wh)
         
         # Effective stress: σ' = λ*tr(ε)*I + 2μ*ε

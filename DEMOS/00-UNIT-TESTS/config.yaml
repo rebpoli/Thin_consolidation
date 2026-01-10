@@ -1,6 +1,6 @@
 mesh:
   Re: 1.0
-  H: 1.0
+  H: 0.1
   N: 10
 
 materials:

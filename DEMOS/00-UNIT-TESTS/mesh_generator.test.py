@@ -9,7 +9,6 @@ from mpi4py import MPI
 import numpy as np
 import config
 from mesh_generator import CylinderMesh
-import gmsh
 
 print("="*70)
 print("MESH GENERATOR - INTERACTIVE TEST")
@@ -18,72 +17,14 @@ print("="*70)
 config.load("config.yaml")
 cfg = config.get()
 
-print("\n--- MESH CONFIGURATION ---")
-print(f"Re (radius) = {cfg.mesh.Re} m")
-print(f"H (height)  = {cfg.mesh.H} m")
-print(f"N (elements per dimension) = {cfg.mesh.N}")
-print(f"Expected element size: {cfg.mesh.H / cfg.mesh.N} m")
-
-print("\n--- CREATING MESH WITH GMSH GUI ---")
-print("Note: Close the gmsh window to continue the test...")
-
-gmsh.initialize()
-gmsh.option.setNumber("General.Terminal", 1)
-
 Re = cfg.mesh.Re
 H = cfg.mesh.H
 N = cfg.mesh.N
-hsize = H / N
 
-gdim = 2
-gmsh.model.add("Cylinder")
-geom = gmsh.model.geo
-
-p1 = geom.add_point(0,  0, 0)
-p2 = geom.add_point(Re, 0, 0)
-p3 = geom.add_point(Re, H, 0)
-p4 = geom.add_point(0,  H, 0)
-
-bottom = geom.add_line(p1, p2)
-right  = geom.add_line(p2, p3)
-top    = geom.add_line(p3, p4)
-left   = geom.add_line(p4, p1)
-
-boundary = geom.add_curve_loop([bottom, right, top, left])
-surf     = geom.add_plane_surface([boundary])
-
-geom.synchronize()
-
-gmsh.option.setNumber("Mesh.CharacteristicLengthMin", hsize)
-gmsh.option.setNumber("Mesh.CharacteristicLengthMax", hsize)
-
-gmsh.model.addPhysicalGroup(gdim, [surf], 1)
-gmsh.model.addPhysicalGroup(gdim - 1, [bottom], 1, name="bottom")
-gmsh.model.addPhysicalGroup(gdim - 1, [right],  2, name="right")
-gmsh.model.addPhysicalGroup(gdim - 1, [top],    3, name="top")
-gmsh.model.addPhysicalGroup(gdim - 1, [left],   4, name="left")
-
-gmsh.model.mesh.generate(gdim)
-
-print("\n--- GMSH MESH STATISTICS ---")
-num_nodes_gmsh = len(gmsh.model.mesh.getNodes()[0])
-num_elements_gmsh = len(gmsh.model.mesh.getElements()[1][0])
-print(f"Number of nodes (gmsh): {num_nodes_gmsh}")
-print(f"Number of elements (gmsh): {num_elements_gmsh}")
-
-if MPI.COMM_WORLD.rank == 0:
-    print("\nOpening gmsh GUI...")
-    print("Mesh visualization tips:")
-    print("  - Use mouse to rotate/zoom")
-    print("  - Tools > Options > Mesh to adjust visualization")
-    print("  - Click on boundaries to see physical groups")
-    gmsh.fltk.run()
-
-gmsh.finalize()
 
 print("\n--- CREATING FENICSX DOMAIN ---")
 mesh = CylinderMesh(comm=MPI.COMM_WORLD)
-domain, facets = mesh.generate()
+domain, facets = mesh.domain, mesh.facets
 
 print("\n--- FENICSX DOMAIN INFORMATION ---")
 
