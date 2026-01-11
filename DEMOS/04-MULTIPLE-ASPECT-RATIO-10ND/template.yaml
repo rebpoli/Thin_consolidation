@@ -1,0 +1,39 @@
+general:
+  description: "%desc%"
+  tags: "%tags%"
+  run_dir: "%run_dir%"
+  run_id: "%run_id%"
+
+mesh:
+  Re: %Re%
+  H: %H%
+  N: 10
+
+materials:
+  E: 1.44e10
+  nu: 0.2
+  alpha: 0.78
+  perm: 1.0e-20
+  visc: 1.0e-3
+  M: 1.35e10
+
+    #UNJACKETED
+boundary_conditions:
+  bottom: # z=0
+    sig_zz: -1.0e5
+    Pressure: 0.0
+    U_r: 0.0
+
+  top:
+    U_z: 0.0
+  
+  right:
+    Pressure: 0.0
+  
+  left:
+    U_r: 0.0
+
+numerical:
+  num_steps: 1000
+  theta_cn: 0.5
+

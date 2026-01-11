@@ -1,4 +1,6 @@
+import os
 import numpy as np
+
 from mpi4py import MPI
 from dolfinx import fem, io
 from dolfinx.fem.petsc import LinearProblem
@@ -8,6 +10,7 @@ import ufl
 import xarray as xr
 from dolfinx.io import VTXWriter
 
+        
 import config
 from formulation import PoroelasticityFormulation
 from analytical import Analytical1DConsolidation
@@ -50,7 +53,7 @@ class PoroelasticitySolver:
         self.history = None
 
         # Create xdmf output
-        with io.XDMFFile(self.domain.comm, "outputs/test.xdmf", "w") as xdmf :
+        with io.XDMFFile(self.domain.comm, self.cfg.output.results, "w") as xdmf :
             xdmf.write_mesh(self.domain)
 
 
@@ -59,8 +62,6 @@ class PoroelasticitySolver:
     #
     #
     def _setup_vtk_output(self):
-        import os
-        
         # Scalar P2 space for u_r
         cell_name = self.domain.topology.cell_name()
         DG0_elem = element("DG", cell_name, 0)
@@ -82,24 +83,8 @@ class PoroelasticitySolver:
         self.von_mises_out = fem.Function(DG0_space, name="von_Mises")
         
         # Get output directory from config
-        output_dir = os.path.dirname(self.cfg.output.vtk_file)
-        if not output_dir:
-            output_dir = "./outputs"
-        
-        # Create PVDExporter
-        self.exporter = PVDExporter(output_dir, self.comm)
-        
-        # Add fields to exporter
-        self.exporter.add_field("displacement", self.u_out)
-        self.exporter.add_field("pressure", self.p_out)
-        self.exporter.add_field("stress", self.stress_vector_out)
-        self.exporter.add_field("von_mises", self.von_mises_out)
-        
-        if self.comm.rank == 0:
-            print(f"✓ VTK output configured:")
-            print(f"  Directory: {output_dir}/")
-            print(f"  Fields: displacement, pressure, stress (vector), von_mises")
-            print(f"  Load script: {output_dir}/load_all.py")
+        output_dir = os.path.dirname(self.cfg.output.results)
+        if self.comm.rank == 0: print(f"✓ Results output configured.")
     
     #
     #
@@ -122,7 +107,6 @@ class PoroelasticitySolver:
             self._print_progress(i_ts, time, dt, history)
             self.wh_old.x.array[:] = self.wh.x.array[:]
         
-        self.exporter.close()
         self.history = history
         
         if self.comm.rank == 0:
@@ -131,6 +115,8 @@ class PoroelasticitySolver:
             print("="*70)
         
         self._save_fem_timeseries()
+
+        self._save_run_summary()
     
     #
     #
@@ -141,29 +127,36 @@ class PoroelasticitySolver:
             bcs=self.bcs,
             u=self.wh,
             petsc_options_prefix="consolid",
+            # Exact solver
             petsc_options={
-#                 "ksp_type": "preonly",
-#                 "pc_type": "lu",
-                "ksp_type": "gmres",
-                "pc_type": "hypre",
-                "ksp_rtol": 1e-8,
-                "ksp_atol": 1e-20,
-#                 "pc_factor_shift_type": "NONZERO",
+                "ksp_type": "preonly",
+                "pc_type": "lu",
+                "pc_factor_mat_solver_type": "mumps",
 #                 "ksp_monitor": None,  
 #                 "ksp_converged_reason": None,  
 #                 "ksp_view": None,     # Show solver configuration
-#                 "ksp_compute_eigenvalues": None,  # Compute eigenvalues
-#                 "ksp_max_it" : 1000,
-                "pc_hypre_type":"boomeramg",
-                "pc_hypre_boomeramg_strong_threshold": 0.7,
-                "pc_hypre_boomeramg_agg_nl": 4,
-                "pc_hypre_boomeramg_agg_num_paths": 5,
-                "pc_hypre_boomeramg_max_levels": 5, 
-                "pc_hypre_boomeramg_coarsen_type": "HMIS", 
-                "pc_hypre_boomeramg_interp_type": "ext+i",
-                "pc_hypre_boomeramg_P_max": 2, 
-                "pc_hypre_boomeramg_truncfactor": 0.3 
-            },
+                }
+
+            # Iterative solver
+#             petsc_options={
+#                 "ksp_type": "gmres",
+#                 "pc_type": "hypre",
+#                 "ksp_rtol": 1e-20,
+#                 "ksp_atol": 1e-20,
+#                 "ksp_monitor": None,  
+#                 "ksp_converged_reason": None,  
+#                 "ksp_view": None,     # Show solver configuration
+#                 "ksp_max_it" : 10000,
+#                 "pc_hypre_type":"boomeramg",
+#                 "pc_hypre_boomeramg_strong_threshold": 0.7,
+#                 "pc_hypre_boomeramg_agg_nl": 4,
+#                 "pc_hypre_boomeramg_agg_num_paths": 5,
+#                 "pc_hypre_boomeramg_max_levels": 5, 
+#                 "pc_hypre_boomeramg_coarsen_type": "HMIS", 
+#                 "pc_hypre_boomeramg_interp_type": "ext+i",
+#                 "pc_hypre_boomeramg_P_max": 2, 
+#                 "pc_hypre_boomeramg_truncfactor": 0.3 
+#             },
         )
         problem.solve()
 
@@ -333,6 +326,8 @@ class PoroelasticitySolver:
         uz_error       = 100 * abs(fem_uz - analytical_uz) / abs(analytical_uz) if analytical_uz != 0 else 0
         volume_error   = 100 * abs(fem_volume - analytical_volume) / abs(analytical_volume) if analytical_volume != 0 else 0
 
+#         print(f"FEM Pressure: {fem_pressure:.6e}, Analytical Pressure: {analytical_pressure:.6e}, Error: {pressure_error:.2f}%")
+
         history['times'].append(time)
         history['pressure_at_top'].append(fem_pressure)
         history['uz_at_bottom'].append(fem_uz)
@@ -363,7 +358,7 @@ class PoroelasticitySolver:
         top_mask = np.abs(z_coords-H) < 1e-10
         
         if np.any(top_mask):
-            return np.mean(p_values[top_mask])
+            return np.max(p_values[top_mask])
         return 0.0
     
     #
@@ -440,7 +435,7 @@ class PoroelasticitySolver:
                 }
 
         # Do the writing
-        with io.XDMFFile(self.domain.comm, "outputs/test.xdmf", "a") as xdmf :
+        with io.XDMFFile(self.domain.comm, self.cfg.output.results, "a") as xdmf :
             for vname in WRITE :
                 reg = WRITE[vname]
                 _out = fem.Function(reg['space'], name=vname)
@@ -458,10 +453,8 @@ class PoroelasticitySolver:
                   f"vol_err={history['volume_error_percent'][-1]:6.2f}%")
     
     def _save_fem_timeseries(self):
-        import os
-        
         # Ensure output directory exists
-        output_dir = os.path.dirname(self.cfg.output.fem_timeseries_file)
+        output_dir = os.path.dirname(self.cfg.output.timeseries)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
         
@@ -491,8 +484,8 @@ class PoroelasticitySolver:
         )
         
         if self.comm.rank == 0:
-            ds.to_netcdf(self.cfg.output.fem_timeseries_file)
-            print(f"\n✓ FEM timeseries saved: {self.cfg.output.fem_timeseries_file}")
+            ds.to_netcdf(self.cfg.output.timeseries)
+            print(f"\n✓ FEM timeseries saved: {self.cfg.output.timeseries}")
     
     #
     #
@@ -504,9 +497,7 @@ class PoroelasticitySolver:
         lines.append("\n" + "="*70)
         lines.append("SIMULATION RESULTS")
         lines.append("="*70)
-        lines.append(f"\nVTK Outputs:")
-        lines.append(self.exporter.summary())
-        lines.append(f"\nTimeseries: {self.cfg.output.fem_timeseries_file}")
+        lines.append(f"\nTimeseries: {self.cfg.output.timeseries}")
         lines.append(f"\nFinal State (t={self.history['times'][-1]:.3f}s):")
         lines.append(f"  Pressure at top:  {self.history['pressure_at_top'][-1]:.6e} Pa")
         lines.append(f"  Displacement at bottom: {self.history['uz_at_bottom'][-1]:.6e} m")
@@ -517,3 +508,34 @@ class PoroelasticitySolver:
         lines.append(f"  Volume error:        {self.history['volume_error_percent'][-1]:.2f}%")
         lines.append("="*70)
         return "\n".join(lines)
+
+    #
+    #
+    def _save_run_summary(self) :
+        data = {
+            'run_id': self.cfg.general.run_id,
+            'run_dir': self.cfg.general.run_dir,
+            'description': self.cfg.general.description,
+            'tags': self.cfg.general.tags,
+            'E': self.cfg.materials.E,
+            'nu': self.cfg.materials.nu,
+            'alpha': self.cfg.materials.alpha,
+            'perm': self.cfg.materials.perm,
+            'visc': self.cfg.materials.visc,
+            'M': self.cfg.materials.M,
+            'Re': self.cfg.mesh.Re,
+            'H': self.cfg.mesh.H,
+            'Re/H': self.cfg.mesh.Re/self.cfg.mesh.H,
+            'final_time': self.history['times'][-1],
+            'pressure_at_top': self.history['pressure_at_top'][-1],
+            'uz_at_bottom': self.history['uz_at_bottom'][-1],
+            'volume_drained': self.history['volume_drained'][-1],
+            'pressure_error_percent': self.history['pressure_error_percent'][-1],
+            'uz_error_percent': self.history['uz_error_percent'][-1],
+            'volume_error_percent': self.history['volume_error_percent'][-1],
+        }
+        import pandas as pd
+        df = pd.DataFrame([data])
+
+        output_dir = os.path.dirname(self.cfg.output.results)
+        df.to_pickle(f'{output_dir}/summary.pkl')        

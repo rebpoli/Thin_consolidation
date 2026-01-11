@@ -5,6 +5,11 @@ import numpy as np
 
 _instance = None
 
+class GeneralCfg(BaseModel):
+    description: str = "[none]"
+    tags:        str = "[none]"
+    run_dir:     str = "[none]"
+    run_id:      str = "[none]"
 
 class MeshCfg(BaseModel):
     Re: float = Field(gt=0, description="Cylinder radius [m]")
@@ -146,19 +151,18 @@ class NumericalCfg(BaseModel):
 
 
 class OutputCfg(BaseModel):
-    vtk_file:                   str = "outputs/results"
-    fem_timeseries_file:        str = "outputs/fem_timeseries.nc"
-    analytical_timeseries_file: str = "outputs/analytical_timeseries.nc"
-    output_dir:                 str = "outputs"
+    results:           str = "outputs/results.xdmf"
+    timeseries:        str = "outputs/fem_timeseries.nc"
 
 
 class Config(BaseModel):
+    general:             GeneralCfg
     mesh:                MeshCfg
     materials:           MaterialCfg
     boundary_conditions: BCCfg
     numerical:           NumericalCfg
-    output:              OutputCfg
-    
+    output:              OutputCfg = Field(default_factory=OutputCfg)
+
     def __init__(self, config_file: str = "config.yaml", **data):
         if not data:
             with open(config_file) as f:
@@ -195,9 +199,8 @@ class Config(BaseModel):
         lines.append(f"  Time steps = {self.numerical.num_steps}")
         lines.append(f"  dt = {self.numerical.dt()} s")
         lines.append(f"\nOutput:")
-        lines.append(f"  VTK file = {self.output.vtk_file}")
-        lines.append(f"  FEM timeseries = {self.output.fem_timeseries_file}")
-        lines.append(f"  Analytical timeseries = {self.output.analytical_timeseries_file}")
+        lines.append(f"  Results file = {self.output.results}")
+        lines.append(f"  Timeseries = {self.output.timeseries}")
         lines.append("="*70)
         return "\n".join(lines)
 
