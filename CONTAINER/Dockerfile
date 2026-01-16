@@ -33,10 +33,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directory for installations
-# WORKDIR /opt/src
 
 RUN pip install --no-cache-dir matplotlib scipy pandas pyvista h5py xarray meshio vtk pydantic PyYAML
-#meshio petsc4py fenics-dolfinx 
+
+
+WORKDIR /opt/src
 
 CMD ["/bin/bash"]
 

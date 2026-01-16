@@ -1,7 +1,13 @@
+general:
+  description: "Unjacketed test"
+  tags: ""
+  run_dir: ""
+  run_id: ""
+
 mesh:
   Re: 1.0
   H: 0.01
-  N: 10
+  N: 1000
 
 materials:
   E: 1.44e10
@@ -22,14 +28,15 @@ boundary_conditions:
     U_z: 0.0
   
   right:
-    Pressure: 0.0
+#     Pressure: 0.0
+    U_r: 0.0
   
   left:
     U_r: 0.0
 
 numerical:
   num_steps: 1000
-  theta_cn: 0.5
+  theta_cn: 0.75
 
 output:
   vtk_file: "outputs/results.bp"

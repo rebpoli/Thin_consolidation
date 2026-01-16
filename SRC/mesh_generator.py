@@ -83,11 +83,11 @@ class CylinderMesh:
         N = self.mesh_cfg.N
 
         # Mesh parameters
-        aspect_ratio = 100.0  # dX:dY ratio
+        aspect_ratio = 100.0  # dX:dY ratio of the rectangles
         refinement_factor = 0.6  # >1 = finer near left boundary
 
-        n_y = N
-        n_x = max(20, int(N / aspect_ratio))
+        n_x = N # max(20, int(N / aspect_ratio))
+        n_y = n_x
 
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
@@ -101,32 +101,73 @@ class CylinderMesh:
         # Generate node coordinates with geometric progression in X
         # ========================================================================
 
-        def generate_x_coords(n_x, length, r):
-            """Generate X coordinates with geometric progression"""
-            if abs(r - 1.0) < 1e-10:
-                return np.linspace(0, length, n_x + 1)
+        def generate_x_coords(length, min_cell_length, max_cell_length, progression=1.5):
+            max_cells=1000
+            coords = [length]  # Start from the right
+            current_pos = length
+            cell_length = min_cell_length  # Start with min at the right
+            cell_count = 0
+            
+            while current_pos > 0:
+                cell_count += 1
+                if cell_count > max_cells:
+                    raise ValueError(f"Exceeded maximum number of cells ({max_cells}). "
+                                   f"Cannot generate mesh for length={length} with current parameters.")
+                
+                # Use the smaller of: current cell length or remaining distance
+                actual_length = min(cell_length, current_pos)
+                current_pos -= actual_length
+                coords.append(current_pos)
+                
+                # Grow cell length for next iteration, but cap at max
+                cell_length = min(cell_length * progression, max_cell_length)
+            
+            # Reverse to get coordinates from left to right (0 to length)
+            coords.reverse()
+            return np.array(coords)        
 
-            x = np.zeros(n_x + 1)
-            x[0] = 0.0
-            dx_0 = length * (r - 1) / (r**n_x - 1)
+        #
+        def generate_y_coords(length, min_cell_length, max_cell_length, progression=1.5):
+            max_cells = 1000
+            coords = [0.0]
+            current_pos = 0.0
+            cell_length = min_cell_length
+            cell_count = 0
 
-            for i in range(n_x):
-                x[i + 1] = x[i] + dx_0 * r**i
+            while current_pos < length:
+                cell_count += 1
+                if cell_count > max_cells:
+                    raise ValueError(f"Exceeded maximum number of cells ({max_cells}). "
+                                   f"Cannot generate mesh for length={length} with current parameters.")
 
-            return x * (length / x[-1])  # Normalize
+                # Use the smaller of: current cell length or remaining distance
+                actual_length = min(cell_length, length - current_pos)
+                current_pos += actual_length
+                coords.append(current_pos)
 
-        x_coords = generate_x_coords(n_x, Re, refinement_factor)
-        y_coords = np.linspace(0, H, n_y + 1)
+                # Grow cell length for next iteration, but cap at max
+                cell_length = min(cell_length * progression, max_cell_length)
+
+            return np.array(coords)
+
+        x_coords = generate_x_coords(Re, Re/N, 100*Re/N)
+        y_coords = generate_y_coords(H, H/N, 100*H/N)
+#         y_coords = np.linspace(0, H, n_y + 1)
 
         # ========================================================================
         # Create structured grid of points
         # ========================================================================
 
+
         geom = gmsh.model.geo
         points = {}
 
-        for j in range(n_y + 1):
-            for i in range(n_x + 1):
+        # Calculate actual number of cells from coordinate arrays
+        n_x = len(x_coords) - 1
+        n_y = len(y_coords) - 1
+
+        for j in range(len(y_coords)):
+            for i in range(len(x_coords)):
                 tag = j * (n_x + 1) + i + 1
                 points[(i, j)] = geom.add_point(x_coords[i], y_coords[j], 0, tag=tag)
 
@@ -198,6 +239,7 @@ class CylinderMesh:
         right_lines = [v_lines[(n_x, j)] for j in range(n_y)]
         top_lines = [h_lines[(i, n_y)] for i in range(n_x)]
         left_lines = [v_lines[(0, j)] for j in range(n_y)]
+
 
         # Add physical groups
         gmsh.model.addPhysicalGroup(gdim, surfaces, 1)

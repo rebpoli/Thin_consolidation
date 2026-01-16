@@ -2,6 +2,7 @@ from dolfinx import fem
 import ufl
 import numpy as np
 
+from petsc4py import PETSc
 import config
 
 
@@ -76,14 +77,17 @@ class PoroelasticityFormulation:
         
         dx = ufl.Measure("dx", domain=self.domain)
         ds = ufl.Measure("ds", domain=self.domain, subdomain_data=self.facets)
-        
+
+        # For rigid BC
+        bottom_marker = self._get_boundary_marker('bottom')
+
         # BILINEAR FORM (LHS)
         a = (
             # Mechanical equilibrium: quasi-static, NO theta-weighting
             # (instantaneous equilibrium at current timestep)
             +  ufl.inner(self.sigma_eff(u), self.eps(v)) * r * dx
             -  self.alpha * p * self.eps_v(v) * r * dx
-            
+
             # Flow equation: time derivatives + theta-weighted diffusion
             + self.alpha / dt_const * self.eps_v(u) * q * r * dx
             + theta * (self.perm / self.visc) * ufl.inner(ufl.grad(p), ufl.grad(q)) * r * dx
@@ -96,7 +100,7 @@ class PoroelasticityFormulation:
             + self.alpha / dt_const * self.eps_v(u_old) * q * r * dx
             - (1 - theta) * (self.perm / self.visc) * ufl.inner(ufl.grad(p_old), ufl.grad(q)) * r * dx
             + (1.0 / self.M) * p_old / dt_const * q * r * dx
-            
+
             # Neumann boundary conditions
             +  self._apply_neumann_bcs(v, q, r, dx, ds)
         )
@@ -149,6 +153,41 @@ class PoroelasticityFormulation:
                 bcs.append(bc_p)
         
         return bcs
+
+    #
+    # Set rigid constraints using the penalty method
+    #
+    def set_rigid_constraints( self, A ) :
+        for surface in ['bottom', 'right', 'top', 'left']:
+            ## Set rigid constraints
+            marker_id  = self._get_boundary_marker(surface)
+            bc_spec = getattr(self.bc_cfg, surface)
+
+            components = []
+            if bc_spec.U_r_rigid : components.append(0)
+            if bc_spec.U_z_rigid : components.append(1)
+
+            for component in components :
+                facet_indices = self.facets.find(marker_id)
+                dofs = fem.locate_dofs_topological( self.W.sub(0).sub(component), self.domain.topology.dim - 1, facet_indices)
+                dofs = np.sort(dofs)
+                ref_dof = dofs[0]
+                penalty = self.numerical_cfg.penalty_rigid
+
+                indptr, indices, data = A.getValuesCSR()
+                A.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+                A.setOption(PETSc.Mat.Option.KEEP_NONZERO_PATTERN, False)
+
+                ## Assign a penalty between the refernce DOF and every other DOF in the boundary
+                for dof in dofs[1:]:
+                    A.setValue(dof, dof, penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                    A.setValue(ref_dof, ref_dof, penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                    A.setValue(dof, ref_dof, -penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                    A.setValue(ref_dof, dof, -penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                
+                A.assemble()
+
+
     
     #
     #

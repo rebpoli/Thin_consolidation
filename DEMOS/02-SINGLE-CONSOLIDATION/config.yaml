@@ -1,3 +1,9 @@
+general:
+  description: "Jacketed test"
+  tags: ""
+  run_dir: ""
+  run_id: ""
+
 mesh:
   Re: 1.0
   H: 0.01

@@ -110,7 +110,7 @@ class Analytical1DConsolidation:
 
         t_s = c_v * time / (4 * H**2)  
         F = 0.0
-        for n in range(50):
+        for n in range(500):
             m = (2*n + 1) * np.pi
             F += (1.0 / m**2) * (1.0 - np.exp(-m**2 * t_s))
 

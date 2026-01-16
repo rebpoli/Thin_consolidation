@@ -56,6 +56,8 @@ class MaterialCfg(BaseModel):
 class BoundaryCondition(BaseModel):
     U_r:      Optional[float] = None
     U_z:      Optional[float] = None
+    U_r_rigid: int = 0
+    U_z_rigid: int = 0
     sig_rr:   Optional[float] = None
     sig_zz:   Optional[float] = None
     Pressure: Optional[float] = None
@@ -79,6 +81,7 @@ class NumericalCfg(BaseModel):
     num_steps: int    = Field(gt=1, description="Number of time steps")
     theta_cn: float   = Field(gt=0, le=1, description="Crank-Nicholson theta (0:Explicit ; 0.5: C-N ; 1: Implicit)", default=0.5)
     end_time_s: float = Field(gt=0, description="End time t* (dimensionless)", default=0.25)
+    penalty_rigid: float = 1e10
     
     _current_step: int  = 0
     _time_list:    list = None

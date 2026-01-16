@@ -2,6 +2,8 @@ import os
 import numpy as np
 
 from mpi4py import MPI
+from petsc4py import PETSc
+
 from dolfinx import fem, io
 from dolfinx.fem.petsc import LinearProblem
 from basix.ufl import element, mixed_element
@@ -37,8 +39,10 @@ class PoroelasticitySolver:
         cell_name = self.domain.topology.cell_name()
         P2 = element("Lagrange", cell_name, 2, shape=(self.gdim,))
         P1 = element("Lagrange", cell_name, 1)
+
         mixed_elem = mixed_element([P2, P1])
         self.W = fem.functionspace(self.domain, mixed_elem)
+
         
         # Formulation
         self.formulation = PoroelasticityFormulation(self.domain, self.W, self.facets)
@@ -116,123 +120,70 @@ class PoroelasticitySolver:
         
         self._save_fem_timeseries()
 
+
         self._save_run_summary()
-    
+
     #
     #
     def _solve_timestep(self, dt):
         a, L = self.formulation.weak_form(dt, self.wh_old)
-        problem = LinearProblem(
-            a, L,
-            bcs=self.bcs,
-            u=self.wh,
-            petsc_options_prefix="consolid",
-            # Exact solver
-            petsc_options={
-                "ksp_type": "preonly",
-                "pc_type": "lu",
-                "pc_factor_mat_solver_type": "mumps",
-#                 "ksp_monitor": None,  
-#                 "ksp_converged_reason": None,  
-#                 "ksp_view": None,     # Show solver configuration
-                }
-
-            # Iterative solver
-#             petsc_options={
-#                 "ksp_type": "gmres",
-#                 "pc_type": "hypre",
-#                 "ksp_rtol": 1e-20,
-#                 "ksp_atol": 1e-20,
-#                 "ksp_monitor": None,  
-#                 "ksp_converged_reason": None,  
-#                 "ksp_view": None,     # Show solver configuration
-#                 "ksp_max_it" : 10000,
-#                 "pc_hypre_type":"boomeramg",
-#                 "pc_hypre_boomeramg_strong_threshold": 0.7,
-#                 "pc_hypre_boomeramg_agg_nl": 4,
-#                 "pc_hypre_boomeramg_agg_num_paths": 5,
-#                 "pc_hypre_boomeramg_max_levels": 5, 
-#                 "pc_hypre_boomeramg_coarsen_type": "HMIS", 
-#                 "pc_hypre_boomeramg_interp_type": "ext+i",
-#                 "pc_hypre_boomeramg_P_max": 2, 
-#                 "pc_hypre_boomeramg_truncfactor": 0.3 
-#             },
-        )
-        problem.solve()
-
-#         # Quick check
-#         A = problem.A
-#         norm = A.norm()
-#         diag = A.getDiagonal()
-#         diag_ratio = abs(diag.max()[1] / diag.min()[1])
-#         print(f"\nQuick conditioning check:")
-#         print(f"  Matrix norm: {norm:.3e}")
-#         print(f"  Diagonal ratio: {diag_ratio:.3e}")
-#         if diag_ratio > 1e10:
-#             print(f"  ⚠️ WARNING: Poorly conditioned (ratio > 1e10)")
-#             print(f"  → Consider: non-dimensionalization, scaling, or better preconditioner")
-
-#         print("Letsc check the condition number ...")
-#         ## Some debugging..
-#         # AFTER solving, access the matrix
-#         A = problem.A  # This is the assembled PETSc matrix
-
-#         def estimate_condition_number(A):
-#             """Simple condition number estimate using matrix norms"""
-#             from petsc4py import PETSc
-
-#             # Get matrix norms
-#             norm_1 = A.norm(PETSc.NormType.NORM_1)  # 1-norm
-#             norm_inf = A.norm(PETSc.NormType.NORM_INFINITY)  # inf-norm
-#             norm_frob = A.norm(PETSc.NormType.FROBENIUS)  # Frobenius norm
-
-#             print(f"\nMatrix norms:")
-#             print(f"  1-norm: {norm_1:.3e}")
-#             print(f"  ∞-norm: {norm_inf:.3e}")
-#             print(f"  Frobenius: {norm_frob:.3e}")
-
-#             # Approximate inverse norm (expensive!)
-#             # Create inverse estimator
-#             ksp = PETSc.KSP().create(A.getComm())
-#             ksp.setOperators(A)
-#             ksp.setType("preonly")
-#             ksp.getPC().setType("lu")
-
-#             # Create vectors for norm estimation
-#             x = A.createVecRight()
-#             y = A.createVecLeft()
-
-#             # Random vector
-#             x.setRandom()
-#             x.normalize()
-
-#             # Solve A*y = x to get A^{-1}*x
-#             ksp.solve(x, y)
-
-#             # Approximate condition number
-#             cond_approx = norm_frob * y.norm()
-
-#             print(f"  Approximate condition number: {cond_approx:.3e}")
-
-#             if cond_approx > 1e10:
-#                 print(f"  ⚠️ WARNING: Poorly conditioned system!")
-#             elif cond_approx > 1e6:
-#                 print(f"  ⚠️ CAUTION: Moderately ill-conditioned")
-#             else:
-#                 print(f"  ✓ Well-conditioned")
-
-#             return cond_approx
-
-
-#         # Use it
-#         cond = estimate_condition_number(A)
-
-#         print(f"\nMatrix conditioning:")
-#         print(f"  Condition number: {cond:.3e}")
-#         if cond > 1e10:
-#             print(f"  ⚠️ WARNING: Poorly conditioned!")
         
-    
+        # Assemble the system
+        A = fem.petsc.assemble_matrix(fem.form(a), bcs=self.bcs)
+
+        b = fem.petsc.assemble_vector(fem.form(L))
+        fem.petsc.apply_lifting(b, [fem.form(a)], [self.bcs])
+        b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        fem.petsc.set_bc(b, self.bcs)
+
+        A.assemble()
+
+        self.formulation.set_rigid_constraints( A )
+
+        A.assemble()
+
+        # Create solver
+        solver = PETSc.KSP().create(self.mesh.comm)
+        solver.setOptionsPrefix("my_ksp_")
+        solver.setOperators(A)
+
+        #  Access the PETSc options database
+        opts = PETSc.Options()
+        prefix = solver.getOptionsPrefix()
+#         opts[f"{prefix}ksp_monitor"] = None
+        opts[f"{prefix}ksp_type"] = "preonly"
+        opts[f"{prefix}pc_type"] = "lu"
+        opts[f"{prefix}pc_factor_mat_solver_type"] = "mumps"
+
+        # Solve
+        solver.setFromOptions()
+        solver.solve(b, self.wh.x.petsc_vec)
+
+        # Sync all processors
+        self.wh.x.scatter_forward()
+
+
+# #             # Iterative solver
+# #             petsc_options={
+# #                 "ksp_type": "gmres",
+# #                 "pc_type": "hypre",
+# #                 "ksp_rtol": 1e-20,
+# #                 "ksp_atol": 1e-20,
+# # #                 "ksp_monitor": None,  
+# #                 "ksp_converged_reason": None,  
+# # #                 "ksp_view": None,     # Show solver configuration
+# #                 "ksp_max_it" : 10000,
+# #                 "pc_hypre_type":"boomeramg",
+# #                 "pc_hypre_boomeramg_strong_threshold": 0.7,
+# #                 "pc_hypre_boomeramg_agg_nl": 4,
+# #                 "pc_hypre_boomeramg_agg_num_paths": 5,
+# #                 "pc_hypre_boomeramg_max_levels": 5, 
+# #                 "pc_hypre_boomeramg_coarsen_type": "HMIS", 
+# #                 "pc_hypre_boomeramg_interp_type": "ext+i",
+# #                 "pc_hypre_boomeramg_P_max": 2, 
+# #                 "pc_hypre_boomeramg_truncfactor": 0.3 
+# #             },
+
     #
     #
     def _compute_and_project_stresses(self):
@@ -392,17 +343,23 @@ class PoroelasticitySolver:
 
         # Extract displacement and pressure from solution
         u, p = ufl.split(self.wh)
+        u_old, p_old = ufl.split(self.wh_old)
         r = ufl.SpatialCoordinate(self.domain)[0]  # Radial coordinate
+
+        cfg = self.cfg
+        mu    = cfg.materials.mu
+        S     = cfg.materials.S
+        eta   = cfg.materials.eta
+        sig0 = -1e5
+        p0  = -sig0 * eta / mu / S
+        Re = cfg.mesh.Re
+
+        dx = ufl.Measure("dx", domain=self.domain, metadata={"quadrature_degree": 10})
         
-        integrand = - (self.formulation.alpha * self.formulation.eps_v(u) + p / self.formulation.M) * r
-        dx = ufl.Measure("dx", domain=self.domain)#, metadata={"quadrature_degree": 1})
-        form = fem.form(integrand * dx)
-        local_integral = fem.assemble_scalar(form)
-
-        global_integral = self.comm.allreduce(local_integral, op=MPI.SUM)
-
-        # Multiply by 2π for the axisymmetric revolution
-        delta_V = 2.0 * np.pi * global_integral
+        i1 = -(self.formulation.alpha * self.formulation.eps_v(u) + p / self.formulation.M) * 2 * np.pi * r
+        form = fem.form(i1 * dx)
+        l1 = fem.assemble_scalar(form)
+        delta_V = self.comm.allreduce(l1, op=MPI.SUM)
 
         return delta_V
     
