@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y \
 # Create directory for installations
 
 RUN pip install --no-cache-dir matplotlib scipy pandas pyvista h5py xarray meshio vtk pydantic PyYAML
+RUN pip install --no-cache-dir netCDF4
 
 
 WORKDIR /opt/src
