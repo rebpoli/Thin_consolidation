@@ -108,12 +108,12 @@ def _plot_pressure(ax, ds, color, max_time=None):
     if ds is None:
         return
     t = ds["time"].values
-    
+
     # Filter by max_time if specified
     if max_time is not None:
         mask = t <= max_time
         t = t[mask]
-    
+
     has_stats = ("pressure_mean" in ds and
                  "pressure_p10"  in ds and
                  "pressure_p90"  in ds)
@@ -121,23 +121,30 @@ def _plot_pressure(ax, ds, color, max_time=None):
         p_mean = ds["pressure_mean"].values / 1e3
         p_p10  = ds["pressure_p10"].values  / 1e3
         p_p90  = ds["pressure_p90"].values  / 1e3
-        
+
         # Filter by max_time
         if max_time is not None:
             p_mean = p_mean[mask]
             p_p10  = p_p10[mask]
             p_p90  = p_p90[mask]
-        
+
         ax.plot(t, p_mean, color=color, linewidth=1.5, zorder=3)
         ax.fill_between(t, p_p10, p_p90,
                         color=color, alpha=0.25, linewidth=0, zorder=2)
+
+        # Annotate with P90-P10 range at final plotted timestep
+        final_range = float(p_p90[-1] - p_p10[-1])
+        ax.text(0.99, 0.97, f"ΔP={final_range:.1f} kPa",
+                transform=ax.transAxes, fontsize=7,
+                va="top", ha="right", color=color,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7))
     elif "pressure_at_top" in ds:
         p_data = ds["pressure_at_top"].values / 1e3
-        
+
         # Filter by max_time
         if max_time is not None:
             p_data = p_data[mask]
-        
+
         ax.plot(t, p_data,
                 color=color, linewidth=1.5, linestyle="--", zorder=3)
 

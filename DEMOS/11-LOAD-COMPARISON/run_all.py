@@ -67,24 +67,27 @@ def _all_cases():
         etv = _end_time_tv(cv)
         tag = _fmt_perm(float(perm))
 
-        # Setup A: relaxed until t_start, then 500s at -5 MPa, then -1 MPa forever
+        # Setup A: relaxed until t_start, then 500s at -5 MPa,
+        # then stepped transition to -1 MPa (5 steps × 100 s), held forever
         cases.append({
             "setup":      "A",
             "label":      f"A_perm_{tag}",
             "perm":       float(perm),
             "end_time_tv": etv,
             "periodic_load": {
-                "L0":         0.0,
-                "L1":         _L_OVERSTRESS,
-                "L_after":    _L_BASELINE,
-                "t_start":    _T_START,
-                "period":     _T_ON,    # 500s — single on-phase, then L_after
-                "duty_cycle": 1.0,
-                "n_periods":  1,
+                "L0":                  0.0,
+                "L1":                  _L_OVERSTRESS,
+                "L_after":             _L_BASELINE,
+                "t_start":             _T_START,
+                "period":              _T_ON,    # 500s — single on-phase, then L_after
+                "duty_cycle":          1.0,
+                "n_periods":           1,
+                "transition_steps":    5,
+                "transition_step_dur": 100.0,
             },
         })
 
-        # Setup B: constant -1 MPa for 1500s then no load
+        # Setup B: relaxed until t_start, then constant -1 MPa forever
         cases.append({
             "setup":      "B",
             "label":      f"B_perm_{tag}",
@@ -93,7 +96,7 @@ def _all_cases():
             "periodic_load": {
                 "L0":         0.0,
                 "L1":         _L_BASELINE,
-                "L_after":    0.0,
+                "L_after":    _L_BASELINE,
                 "t_start":    _T_START,
                 "period":     _T_CONST,   # 1500s
                 "duty_cycle": 1.0,

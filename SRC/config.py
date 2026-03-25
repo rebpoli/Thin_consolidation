@@ -54,47 +54,90 @@ class MaterialCfg(BaseModel):
 
 
 class PeriodicLoad(BaseModel):
-    L0:          float         = 0.0   # baseline load [Pa] — before t_start and during off-phase
-    L1:          float                 # active load level [Pa] — during on-phase
-    t_start:     float         = 0.0   # time when cycling begins [s]
-    period:      float                 # full cycle duration [s]
-    duty_cycle:  float         = 0.5   # fraction of period spent at L1 (0–1)
-    n_periods:   int           = -1    # number of cycles; -1 = infinite
-    L_after:     Optional[float] = None  # load after cycling ends; default = (L1-L0)*duty_cycle
+    L0:                   float         = 0.0   # baseline load [Pa] — before t_start and during off-phase
+    L1:                   float                 # active load level [Pa] — during on-phase
+    t_start:              float         = 0.0   # time when cycling begins [s]
+    period:               float                 # full cycle duration [s]
+    duty_cycle:           float         = 0.5   # fraction of period spent at L1 (0–1)
+    n_periods:            int           = -1    # number of cycles; -1 = infinite
+    L_after:              Optional[float] = None  # load after cycling ends; default = (L1-L0)*duty_cycle
+    transition_steps:     int           = 0     # steps in the L1→L0/L_after ramp; 0 = instant jump
+    transition_step_dur:  float         = 100.0 # duration of each step [s]
 
     def _l_after(self) -> float:
         return self.L_after if self.L_after is not None else (self.L1 - self.L0) * self.duty_cycle
+
+    def _transition(self, L_src: float, L_dst: float, t_since: float) -> float:
+        """Stepped ramp from L_src to L_dst, t_since seconds after the start of the transition."""
+        n = self.transition_steps
+        if n <= 0 or L_src == L_dst:
+            return L_dst
+        total = n * self.transition_step_dur
+        if t_since >= total:
+            return L_dst
+        k = int(t_since / self.transition_step_dur)   # 0-based step index
+        return L_src + (k + 1) / n * (L_dst - L_src)
 
     def eval(self, t: float) -> float:
         """Return the load value at physical time t [s]."""
         if t < self.t_start:
             return self.L0
         t_rel = t - self.t_start
+        l_after = self._l_after()
+
         if self.n_periods >= 0 and t_rel >= self.n_periods * self.period:
-            return self._l_after()
+            # Level just before the n_periods boundary
+            L_src = self.L1 if self.duty_cycle >= 1.0 else self.L0
+            return self._transition(L_src, l_after, t_rel - self.n_periods * self.period)
+
         phase = (t_rel % self.period) / self.period
-        return self.L1 if phase < self.duty_cycle else self.L0
+        if phase < self.duty_cycle:
+            return self.L1
+        # Off-phase: stepped transition L1 → L0
+        t_since_fall = (t_rel % self.period) - self.duty_cycle * self.period
+        return self._transition(self.L1, self.L0, t_since_fall)
 
     def switch_times(self, t_end: float) -> list:
         """Return sorted list of all load-change times in (0, t_end)."""
         times = set()
-        t_on  = self.period * self.duty_cycle     # on-duration per cycle
+        t_on  = self.period * self.duty_cycle
+        l_after = self._l_after()
         n_max = (self.n_periods if self.n_periods >= 0
                  else int((t_end - self.t_start) / self.period) + 2)
+
+        def _add(t):
+            if 1e-12 < t < t_end - 1e-12:
+                times.add(t)
+
+        def _add_trans(t0, L_src, L_dst):
+            """Add switch times for a (possibly stepped) transition starting at t0."""
+            if L_src == L_dst:
+                return
+            n = self.transition_steps
+            if n > 0:
+                for s in range(n):
+                    _add(t0 + s * self.transition_step_dur)
+            else:
+                _add(t0)
+
         for k in range(n_max):
             t_rise = self.t_start + k * self.period
             t_fall = t_rise + t_on
             if t_rise > t_end:
                 break
+            # Rising edge: always an instant jump to L1
             if t_rise > 1e-12:
-                times.add(t_rise)
-            if t_fall < t_end - 1e-12:
-                times.add(t_fall)
-        # Final transition to L_after (finite cycles only)
+                _add(t_rise)
+            # Falling edge within cycle (only when off-phase exists)
+            if self.duty_cycle < 1.0:
+                _add_trans(t_fall, self.L1, self.L0)
+
+        # Final transition to L_after
         if self.n_periods >= 0:
             t_fin = self.t_start + self.n_periods * self.period
-            if 1e-12 < t_fin < t_end - 1e-12:
-                times.add(t_fin)
+            L_src = self.L1 if self.duty_cycle >= 1.0 else self.L0
+            _add_trans(t_fin, L_src, l_after)
+
         return sorted(times)
 
 
