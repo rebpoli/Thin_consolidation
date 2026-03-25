@@ -41,6 +41,10 @@ _T_CYCLE_END  = _T_START + _T_CONST          # 1550s — end of active protocol
 _T_MIN        = 2.0 * _T_CYCLE_END           # 3100s — ensure observation window
 _T_PHYS       = _T_MIN                        # effective simulation end time [s]
 
+# Stepped transition parameters
+_N_STEPS_DEFAULT = 5
+_T_STEP_DEFAULT  = 100.0  # 100s per step
+
 # Load levels
 _L_BASELINE   = -1.0e6   # -1 MPa  (setup A off-phase and post-cycle; setup B level)
 _L_OVERSTRESS = -5.0e6   # -5 MPa  (setup A on-phase)
@@ -85,6 +89,10 @@ def _all_cases():
                 "transition_steps":    5,
                 "transition_step_dur": 100.0,
             },
+            "stepped_transition": {
+                "n_steps": _N_STEPS_DEFAULT,
+                "t_step": _T_STEP_DEFAULT,
+            }
         })
 
         # Setup B: relaxed until t_start, then constant -1 MPa forever
@@ -212,6 +220,16 @@ def _draw_table(jobs, t_elapsed, first):
 # ── Config builder ────────────────────────────────────────────────────────────
 
 def _make_config(case):
+    # Handle stepped transition for A setup
+    if case["setup"] == "A" and "stepped_transition" in case:
+        # For stepped transition, we need to build a sequence of load steps
+        periodic_load = case["stepped_transition"]
+        # The transition will go from L1 to L0 in steps
+        # We'll create a single step configuration for now
+        # The actual implementation of stepped transitions needs to be handled in the solver
+        # For now, we'll just pass the parameters through
+        pass
+
     return {
         "general": {
             "description": f"Load comparison {case['label']}",
