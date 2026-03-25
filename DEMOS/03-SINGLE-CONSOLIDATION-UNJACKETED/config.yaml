@@ -28,8 +28,7 @@ boundary_conditions:
     U_z: 0.0
   
   right:
-#     Pressure: 0.0
-    U_r: 0.0
+    Pressure: 0.0
   
   left:
     U_r: 0.0

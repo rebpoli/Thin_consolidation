@@ -65,7 +65,7 @@ class PoroelasticityFormulation:
     
     #
     #
-    def weak_form(self, dt, wh_old):
+    def weak_form(self, dt, t, wh_old):
         u, p = ufl.TrialFunctions(self.W)
         v, q = ufl.TestFunctions(self.W)
         
@@ -102,24 +102,27 @@ class PoroelasticityFormulation:
             + (1.0 / self.M) * p_old / dt_const * q * r * dx
 
             # Neumann boundary conditions
-            +  self._apply_neumann_bcs(v, q, r, dx, ds)
+            +  self._apply_neumann_bcs(v, q, r, dx, ds, t)
         )
         
         return a, L
 
     #
     # Collect all Neumann BC terms
-    def _apply_neumann_bcs(self, v, q, r, dx, ds):
-        
+    def _apply_neumann_bcs(self, v, q, r, dx, ds, t: float = 0.0):
+
         terms = [fem.Constant(self.domain, 0.0) * q * r * dx] ## Dummy to keep type consistency
         n = ufl.FacetNormal(self.domain)
-        
+
         for surface in ['bottom', 'right', 'top', 'left']:
             bc_spec = getattr(self.bc_cfg, surface)
             marker = self._get_boundary_marker(surface)
 
             sig_rr = bc_spec.sig_rr if bc_spec.sig_rr is not None else 0.0
-            sig_zz = bc_spec.sig_zz if bc_spec.sig_zz is not None else 0.0
+            if bc_spec.periodic_load is not None:
+                sig_zz = bc_spec.periodic_load.eval(t)
+            else:
+                sig_zz = bc_spec.sig_zz if bc_spec.sig_zz is not None else 0.0
             if sig_rr == 0.0 and sig_zz == 0.0: continue
 
             # Apply normal

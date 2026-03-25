@@ -7,7 +7,7 @@ general:
 mesh:
   Re: 1.0
   H: 0.01
-  N: 10
+  N: 1000
 
 materials:
   E: 1.44e10
@@ -20,9 +20,15 @@ materials:
     #JACKETED
 boundary_conditions:
   bottom: # z=0
-    sig_zz: -1.0e5
     Pressure: 0.0
     U_r: 0.0
+    periodic_load:
+      L0: 0.0             # baseline load [Pa] — before t_start and during off-phase
+      L1: -1.0e5          # active load level [Pa]
+      t_start: 50.0       # [s] when cycling begins
+      period: 50.0        # [s] full cycle duration
+      duty_cycle: 0.5     # fraction of period at L1
+      n_periods: -1       # -1 = infinite
 
   top:
     U_z: 0.0
@@ -35,7 +41,7 @@ boundary_conditions:
 
 numerical:
   num_steps: 1000
-  theta_cn: 0.5
+  theta_cn: 0.75
 
 output:
   vtk_file: "outputs/results.bp"

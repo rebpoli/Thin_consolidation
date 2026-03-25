@@ -7,7 +7,7 @@ general:
 mesh:
   Re: %Re%
   H: %H%
-  N: 10
+  N: 1000
 
 materials:
   E: 1.44e10
@@ -23,6 +23,7 @@ boundary_conditions:
     sig_zz: -1.0e5
     Pressure: 0.0
     U_r: 0.0
+    U_z_rigid: 1
 
   top:
     U_z: 0.0

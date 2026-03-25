@@ -53,6 +53,51 @@ class MaterialCfg(BaseModel):
         return v
 
 
+class PeriodicLoad(BaseModel):
+    L0:          float         = 0.0   # baseline load [Pa] — before t_start and during off-phase
+    L1:          float                 # active load level [Pa] — during on-phase
+    t_start:     float         = 0.0   # time when cycling begins [s]
+    period:      float                 # full cycle duration [s]
+    duty_cycle:  float         = 0.5   # fraction of period spent at L1 (0–1)
+    n_periods:   int           = -1    # number of cycles; -1 = infinite
+    L_after:     Optional[float] = None  # load after cycling ends; default = (L1-L0)*duty_cycle
+
+    def _l_after(self) -> float:
+        return self.L_after if self.L_after is not None else (self.L1 - self.L0) * self.duty_cycle
+
+    def eval(self, t: float) -> float:
+        """Return the load value at physical time t [s]."""
+        if t < self.t_start:
+            return self.L0
+        t_rel = t - self.t_start
+        if self.n_periods >= 0 and t_rel >= self.n_periods * self.period:
+            return self._l_after()
+        phase = (t_rel % self.period) / self.period
+        return self.L1 if phase < self.duty_cycle else self.L0
+
+    def switch_times(self, t_end: float) -> list:
+        """Return sorted list of all load-change times in (0, t_end)."""
+        times = set()
+        t_on  = self.period * self.duty_cycle     # on-duration per cycle
+        n_max = (self.n_periods if self.n_periods >= 0
+                 else int((t_end - self.t_start) / self.period) + 2)
+        for k in range(n_max):
+            t_rise = self.t_start + k * self.period
+            t_fall = t_rise + t_on
+            if t_rise > t_end:
+                break
+            if t_rise > 1e-12:
+                times.add(t_rise)
+            if t_fall < t_end - 1e-12:
+                times.add(t_fall)
+        # Final transition to L_after (finite cycles only)
+        if self.n_periods >= 0:
+            t_fin = self.t_start + self.n_periods * self.period
+            if 1e-12 < t_fin < t_end - 1e-12:
+                times.add(t_fin)
+        return sorted(times)
+
+
 class BoundaryCondition(BaseModel):
     U_r:      Optional[float] = None
     U_z:      Optional[float] = None
@@ -61,7 +106,8 @@ class BoundaryCondition(BaseModel):
     sig_rr:   Optional[float] = None
     sig_zz:   Optional[float] = None
     Pressure: Optional[float] = None
-    
+    periodic_load: Optional[PeriodicLoad] = None
+
     class Config:
         extra = 'forbid'
 
@@ -74,51 +120,93 @@ class BCCfg(BaseModel):
 
 
 class NumericalCfg(BaseModel):
-#     dt0:   float     = Field(gt=0, description="Initial timestep time")
-#     dtmax: float     = Field(gt=0, description="Maximum timestep time")
-#     dtk:   float     = Field(gt=1, description="Geometric factor to increase dt")
-#     end_time:  float = Field(gt=0, description="End time [s]")
-    num_steps: int    = Field(gt=1, description="Number of time steps")
-    theta_cn: float   = Field(gt=0, le=1, description="Crank-Nicholson theta (0:Explicit ; 0.5: C-N ; 1: Implicit)", default=0.5)
-    end_time_s: float = Field(gt=0, description="End time t* (dimensionless)", default=0.25)
-    penalty_rigid: float = 1e10
-    
+    num_steps:     Optional[int]   = Field(default=None, description="Number of time steps (uniform fallback)")
+    theta_cn:      float           = Field(gt=0, le=1, description="Crank-Nicholson theta (0:Explicit ; 0.5: C-N ; 1: Implicit)", default=0.5)
+    end_time_tv:    float           = Field(gt=0, description="Dimensionless consolidation time T_v = c_v*t/(4H²); t_end[s] = 4H²/c_v * T_v", default=0.25)
+    dt_min_s:      Optional[float] = Field(default=None, description="Minimum physical timestep [s]")
+    dt_max_s:      Optional[float] = Field(default=None, description="Maximum physical timestep [s]")
+    dt_factor:     float           = Field(default=1.5,  description="Geometric growth factor between timesteps")
+    penalty_rigid: float           = 1e10
+
     _current_step: int  = 0
     _time_list:    list = None
-    
+
     class Config:
         arbitrary_types_allowed = True
-    
+
     def __init__(self, **data):
         super().__init__(**data)
         self._current_step = 0
         self._time_list    = [0.0]
 
-#         self._expected_time_list = []
-#         self._expected_dt_list = []
-#         dt = self.dt0
-#         time = 0.0
-#         while time < self.end_time+dt:
-#             dt = min(dt * self.dtk, self.dtmax)
-#             time += dt
-#             self._expected_time_list.append(time)
-#             self._expected_dt_list.append(dt)
-#         self._expected_time_list = np.array(self._expected_time_list)
-#         self._expected_dt_list = np.array( self._expected_dt_list )
-
-    def setup_timesteps( self, config ) :
-        H = config.mesh.H
+    def setup_timesteps(self, config):
+        H   = config.mesh.H
         c_v = config.materials.c_v
-        ts1 = self.end_time_s
-        N = self.num_steps
-        dt_s = ts1/N
-        dt = 4*H*H/c_v * dt_s
-        t_end = 4*H*H/c_v * ts1
-        self._expected_time_list = np.linspace(0, t_end, N + 1)
-        self._expected_dt_list = np.full(N+1, dt)
-        
-#         self._expected_time_list = np.array(self._expected_time_list)
-#         self._expected_dt_list = np.array( self._expected_dt_list )
+        t_end = 4.0 * H * H / c_v * self.end_time_tv
+
+        if self.dt_min_s is not None and self.dt_max_s is not None:
+            self._build_geometric_timesteps(config, t_end)
+        else:
+            N  = self.num_steps if self.num_steps is not None else 1000
+            dt = t_end / N
+            self._expected_time_list = np.linspace(0.0, t_end, N + 1)
+            self._expected_dt_list   = np.full(N + 1, dt)
+
+    def _build_geometric_timesteps(self, config, t_end: float):
+        """Build timestep array with geometric growth, resetting to dt_min after each load change.
+
+        Around every load-switch time t_sw the pattern is:
+          ... dt_max ... | t_sw - dt_min | t_sw | t_sw + dt_min | t_sw + dt_min*f | ...
+        Both the pre-snap (t_sw - dt_min) and the switch itself (t_sw) reset dt to dt_min.
+        """
+        dt_min = self.dt_min_s
+
+        # Collect all load-switch times (physical seconds)
+        switch_times = set()
+        for face in ('bottom', 'right', 'top', 'left'):
+            bc = getattr(config.boundary_conditions, face, None)
+            if bc is None or bc.periodic_load is None:
+                continue
+            switch_times.update(bc.periodic_load.switch_times(t_end))
+
+        # Checkpoints = switch times + pre-snap points (t_sw - dt_min) + t_end
+        # Every checkpoint resets dt = dt_min after being hit.
+        checkpoints = set()
+        for t_sw in switch_times:
+            if 0.0 < t_sw < t_end - 1e-12:
+                checkpoints.add(t_sw)
+            t_pre = t_sw - dt_min
+            if t_pre > 1e-12:
+                checkpoints.add(t_pre)
+        checkpoints.add(t_end)
+        checkpoints = sorted(checkpoints)
+
+        times  = [0.0]
+        t      = 0.0
+        dt     = dt_min
+        cp_idx = 0
+
+        while t < t_end - 1e-12:
+            next_cp = checkpoints[cp_idx]
+            step    = min(dt, next_cp - t)
+            if step < 1e-14:
+                cp_idx += 1
+                dt = dt_min
+                continue
+            t += step
+            times.append(t)
+            if abs(t - next_cp) < 1e-10:
+                cp_idx += 1
+                dt = dt_min
+            else:
+                dt = min(dt * self.dt_factor, self.dt_max_s)
+
+        times = np.array(times)
+        dts   = np.empty_like(times)
+        dts[0]  = 0.0
+        dts[1:] = np.diff(times)
+        self._expected_time_list = times
+        self._expected_dt_list   = dts
     
     def dt(self) -> float:
         return self._expected_dt_list[self._current_step]
@@ -154,8 +242,10 @@ class NumericalCfg(BaseModel):
 
 
 class OutputCfg(BaseModel):
-    results:           str = "outputs/results.xdmf"
+    results:           str = "outputs/results.bp"
     timeseries:        str = "outputs/fem_timeseries.nc"
+    pressure_profile:  str = "outputs/pressure_profile.nc"
+    n_profile_points:  int = 1000
 
 
 class Config(BaseModel):
@@ -197,10 +287,12 @@ class Config(BaseModel):
         lines.append(f"  S (computed) = {self.materials.S:.3e}")
         lines.append(f"  c_v (computed) = {self.materials.c_v:.3e}")
         lines.append(f"  eta (computed) = {self.materials.eta:.3e}")
+        n_steps = len(self.numerical._expected_time_list) - 1
         lines.append(f"\nNumerical Parameters:")
-        lines.append(f"  End time* = {self.numerical.end_time_s} (dimensionless)")
-        lines.append(f"  Time steps = {self.numerical.num_steps}")
-        lines.append(f"  dt = {self.numerical.dt()} s")
+        lines.append(f"  End time* = {self.numerical.end_time_tv} (dimensionless)")
+        lines.append(f"  Time steps = {n_steps}")
+        lines.append(f"  dt_min = {self.numerical._expected_dt_list[1]:.4g} s"
+                     f"  dt_max = {self.numerical._expected_dt_list[1:].max():.4g} s")
         lines.append(f"\nOutput:")
         lines.append(f"  Results file = {self.output.results}")
         lines.append(f"  Timeseries = {self.output.timeseries}")
