@@ -57,7 +57,7 @@ def _fmt_perm(v):
     s = f"{v:.2e}"; m, e = s.split("e")
     return f"{m.rstrip('0').rstrip('.')}e{int(e)}"
 
-PERM_VALUES = np.logspace(-20, -16, 5)
+PERM_VALUES = np.array([1e-22, 1e-21, 1e-20, 1e-19, 1e-18, 1e-17, 1e-16])
 PERM_LABELS = [_fmt_perm(v) for v in PERM_VALUES]
 COLORS      = cm.cividis(np.linspace(0.1, 0.9, len(PERM_VALUES)))
 

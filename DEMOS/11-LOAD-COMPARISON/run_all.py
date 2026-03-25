@@ -45,7 +45,7 @@ _T_PHYS       = _T_MIN                        # effective simulation end time [s
 _L_BASELINE   = -1.0e6   # -1 MPa  (setup A off-phase and post-cycle; setup B level)
 _L_OVERSTRESS = -5.0e6   # -5 MPa  (setup A on-phase)
 
-PERM_VALUES = np.logspace(-20, -16, 5)
+PERM_VALUES = np.array([1e-22, 1e-21, 1e-20, 1e-19, 1e-18, 1e-17, 1e-16])
 
 def _cv(perm):
     S = 1/_M + _alpha**2 * (1 - 2*_nu) / (2 * _mu * (1 - _nu))
