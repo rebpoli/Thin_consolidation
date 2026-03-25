@@ -169,6 +169,59 @@ for i, (label, color) in enumerate(zip(PERM_LABELS, COLORS)):
                 mask = t <= max_time
             else:
                 mask = slice(None)  # No filtering
+
+            if "pressure_mean" in ds:
+                p_vals.extend(ds["pressure_mean"].values[mask] / 1e3)
+            elif "pressure_at_top" in ds:
+                p_vals.extend(ds["pressure_at_top"].values[mask] / 1e3)
+
+    # Per-row label annotation
+    for ax in (ax_p_A[i], ax_p_B[i]):
+        ax.text(0.01, 0.97, legend, transform=ax.transAxes,
+                fontsize=7, va="top", ha="left",
+                color=color, fontweight="bold")
+        ax.set_ylabel("P [kPa]", fontsize=8)
+        ax.tick_params(labelsize=7, labelbottom=False)
+        ax.grid(True, alpha=0.25, zorder=0)
+
+    # Add text with P10-P90 range at final timestep
+    if ds_A is not None and "pressure_p10" in ds_A and "pressure_p90" in ds_A:
+        final_time = ds_A["time"].values[-1]
+        p10_final = ds_A["pressure_p10"].values[-1] / 1e3  # Convert to kPa
+        p90_final = ds_A["pressure_p90"].values[-1] / 1e3  # Convert to kPa
+        range_final = p90_final - p10_final
+        ax_p_A[i].text(0.99, 0.03, f"Range: {range_final:.1f} kPa",
+                      transform=ax_p_A[i].transAxes, fontsize=6, va="bottom", ha="right",
+                      bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"))
+
+    if ds_B is not None and "pressure_p10" in ds_B and "pressure_p90" in ds_B:
+        final_time = ds_B["time"].values[-1]
+        p10_final = ds_B["pressure_p10"].values[-1] / 1e3  # Convert to kPa
+        p90_final = ds_B["pressure_p90"].values[-1] / 1e3  # Convert to kPa
+        range_final = p90_final - p10_final
+        ax_p_B[i].text(0.99, 0.03, f"Range: {range_final:.1f} kPa",
+                      transform=ax_p_B[i].transAxes, fontsize=6, va="bottom", ha="right",
+                      bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"))
+
+p_vals = []
+
+for i, (label, color) in enumerate(zip(PERM_LABELS, COLORS)):
+    legend = f"k = {label} m²"
+    ds_A = data["A"].get(label)
+    ds_B = data["B"].get(label)
+
+    _plot_pressure(ax_p_A[i], ds_A, color, max_time=max_time)
+    _plot_pressure(ax_p_B[i], ds_B, color, max_time=max_time)
+
+    # Collect range for uniform y-limits
+    for ds in (ds_A, ds_B):
+        if ds is not None:
+            # Filter by max_time if specified
+            if max_time is not None:
+                t = ds["time"].values
+                mask = t <= max_time
+            else:
+                mask = slice(None)  # No filtering
             
             if "pressure_mean" in ds:
                 p_vals.extend(ds["pressure_mean"].values[mask] / 1e3)
