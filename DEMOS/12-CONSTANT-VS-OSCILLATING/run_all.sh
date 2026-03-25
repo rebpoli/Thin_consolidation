@@ -4,6 +4,7 @@
 import sys
 import time
 import subprocess
+import shutil
 import yaml
 from pathlib import Path
 from typing import Optional
@@ -126,22 +127,27 @@ def main():
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
     cases = [
-        ("constant_5mpa", "Constant 5 MPa"),
-        ("oscillating_0_10mpa", "Oscillating 0-10 MPa (10 cycles)"),
+        ("constant_5mpa",      "config_constant.yaml",    "Constant 5 MPa"),
+        ("oscillating_0_10mpa","config_oscillating.yaml", "Oscillating 0-10 MPa (10 cycles)"),
     ]
 
     print(f"\n{BOLD}DEMO 12: Constant vs Oscillating Load — launching {len(cases)} parallel runs{RESET}")
     print(f"  solver : {SRC_RUN}")
     print(f"  logs   : {LOG_DIR.relative_to(DEMO_DIR)}/")
-    for label, desc in cases:
+    for label, cfg_file, desc in cases:
         print(f"  • {label}: {desc}")
     print()
 
     jobs = []
-    for label, _ in cases:
+    for label, cfg_file, _ in cases:
         run_dir = RUNS_DIR / label
         log_path = LOG_DIR / f"{label}.log"
         (run_dir / "outputs").mkdir(parents=True, exist_ok=True)
+
+        # Copy the template config into the run directory
+        src_cfg = DEMO_DIR / cfg_file
+        dst_cfg = run_dir / "config.yaml"
+        shutil.copy2(src_cfg, dst_cfg)
 
         job = Job(label=label, log=log_path)
         job.log_fh = open(log_path, "w")
