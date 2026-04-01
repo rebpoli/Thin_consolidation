@@ -233,12 +233,13 @@ class PoroelasticityFormulation:
         
         # Extract components
         sigma_rr = sigma_total[0, 0]
+        sigma_tt = sigma_total[1, 1]   # hoop stress
         sigma_zz = sigma_total[2, 2]
         sigma_rz = sigma_total[0, 2]
-        
+
         # von Mises: √(3/2 * s:s) where s is deviatoric stress
         sigma_mean = ufl.tr(sigma_total) / 3.0
         s = sigma_total - sigma_mean * ufl.Identity(3)
         von_mises = ufl.sqrt((3.0/2.0) * ufl.inner(s, s))
-        
-        return sigma_rr, sigma_zz, sigma_rz, von_mises
+
+        return sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises

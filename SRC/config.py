@@ -285,10 +285,12 @@ class NumericalCfg(BaseModel):
 
 
 class OutputCfg(BaseModel):
-    results:           str = "outputs/results.bp"
-    timeseries:        str = "outputs/fem_timeseries.nc"
-    pressure_profile:  str = "outputs/pressure_profile.nc"
-    n_profile_points:  int = 1000
+    results:             str = "outputs/results.bp"
+    timeseries:          str = "outputs/fem_timeseries.nc"
+    pressure_profile:    str = "outputs/pressure_profile.nc"
+    invariants_nc:       str = "outputs/invariants.nc"
+    n_profile_points:    int = 1000
+    n_invariant_points:  int = 500
 
 
 class Config(BaseModel):

@@ -55,6 +55,7 @@ class PoroelasticitySolver:
 
         self._setup_vtk_output()
         self._setup_vertical_line_sampler()
+        self._setup_invariant_sampler()
 
         self.history = None
 
@@ -72,6 +73,7 @@ class PoroelasticitySolver:
         self.u_out         = fem.Function(V_out, name="Displacement")
         self.p_out         = fem.Function(Q_out, name="Pressure")
         self.sigma_rr_out  = fem.Function(Q_out, name="sigma_rr")
+        self.sigma_tt_out  = fem.Function(Q_out, name="sigma_tt")
         self.sigma_zz_out  = fem.Function(Q_out, name="sigma_zz")
         self.sigma_rz_out  = fem.Function(Q_out, name="sigma_rz")
         self.von_mises_out = fem.Function(Q_out, name="von_Mises")
@@ -82,8 +84,8 @@ class PoroelasticitySolver:
             self.domain.comm,
             output_path,
             [self.u_out, self.p_out,
-             self.sigma_rr_out, self.sigma_zz_out, self.sigma_rz_out,
-             self.von_mises_out],
+             self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
+             self.sigma_rz_out, self.von_mises_out],
             engine="BP4",
         )
 
@@ -110,6 +112,7 @@ class PoroelasticitySolver:
         prev_loads = {}
         self._open_timeseries_nc()
         self._open_pressure_profile_nc()
+        self._open_invariants_nc()
 
         #
         # Timestep loop
@@ -122,6 +125,7 @@ class PoroelasticitySolver:
             self._write_timestep(time)
             self._append_timeseries_record(history, time)
             self._append_pressure_profile_record(time)
+            self._append_invariants_record(time)
             self._print_progress(i_ts, time, dt, history)
             self.wh_old.x.array[:] = self.wh.x.array[:]
 
@@ -135,6 +139,7 @@ class PoroelasticitySolver:
         self.vtx_writer.close()
         self._close_timeseries_nc()
         self._close_pressure_profile_nc()
+        self._close_invariants_nc()
 
         self._save_run_summary()
 
@@ -179,12 +184,14 @@ class PoroelasticitySolver:
     #
     #
     def _compute_and_project_stresses(self):
-        sigma_rr, sigma_zz, sigma_rz, von_mises = self.formulation.compute_stress_components(self.wh)
+        sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises = self.formulation.compute_stress_components(self.wh)
         self._project_scalar(sigma_rr,  self.sigma_rr_out)
+        self._project_scalar(sigma_tt,  self.sigma_tt_out)
         self._project_scalar(sigma_zz,  self.sigma_zz_out)
         self._project_scalar(sigma_rz,  self.sigma_rz_out)
         self._project_scalar(von_mises, self.von_mises_out)
-        for f in [self.sigma_rr_out, self.sigma_zz_out, self.sigma_rz_out, self.von_mises_out]:
+        for f in [self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
+                  self.sigma_rz_out, self.von_mises_out]:
             f.x.scatter_forward()
 
     def _project_scalar(self, expr, target_func):
@@ -452,6 +459,118 @@ class PoroelasticitySolver:
         self._nc_ds.close()
         print(f"\n✓ FEM timeseries saved: {self.cfg.output.timeseries}")
     
+    def _setup_invariant_sampler(self):
+        """Build a spatially uniform grid and locate the containing cell for each point."""
+        from dolfinx.geometry import bb_tree, compute_collisions_points, compute_colliding_cells
+
+        n   = self.cfg.output.n_invariant_points
+        Re  = self.cfg.mesh.Re
+        H   = self.cfg.mesh.H
+
+        # Regular grid with aspect ratio matching the domain
+        ratio = Re / H
+        n_z   = max(2, round(np.sqrt(n / ratio)))
+        n_r   = max(2, round(n / n_z))
+        r_1d  = np.linspace(0, Re, n_r)
+        z_1d  = np.linspace(0, H,  n_z)
+        R, Z  = np.meshgrid(r_1d, z_1d)
+        r_flat = R.ravel();  z_flat = Z.ravel()
+        pts    = np.column_stack([r_flat, z_flat, np.zeros(len(r_flat))])
+
+        # Find which cell contains each grid point
+        tree       = bb_tree(self.domain, self.domain.topology.dim)
+        candidates = compute_collisions_points(tree, pts)
+        colliding  = compute_colliding_cells(self.domain, candidates, pts)
+
+        valid_idx, valid_cells = [], []
+        for i in range(len(pts)):
+            lnk = colliding.links(i)
+            if len(lnk) > 0:
+                valid_idx.append(i)
+                valid_cells.append(int(lnk[0]))
+
+        valid_idx       = np.array(valid_idx)
+        self._inv_pts   = pts[valid_idx]               # (n_valid, 3)
+        self._inv_cells = np.array(valid_cells)        # (n_valid,)
+        self._inv_r     = r_flat[valid_idx]
+        self._inv_z     = z_flat[valid_idx]
+
+        if self.comm.rank == 0:
+            print(f"✓ Invariant sampler: {len(valid_idx)} valid points "
+                  f"on {n_r}×{n_z} regular grid (requested {n})")
+
+    def _open_invariants_nc(self):
+        if self.comm.rank != 0:
+            return
+        path = self.cfg.output.invariants_nc
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        n  = len(self._inv_pts)
+        ds = nc4.Dataset(path, 'w', format='NETCDF3_64BIT_OFFSET')
+        ds.createDimension('point', n)
+        ds.createDimension('time',  None)          # unlimited
+        r_var = ds.createVariable('r',    'f8', ('point',))
+        z_var = ds.createVariable('z',    'f8', ('point',))
+        ds.createVariable('time',   'f8', ('time',))
+        ds.createVariable('I1',     'f4', ('time', 'point'))
+        ds.createVariable('J2',     'f4', ('time', 'point'))
+        ds.createVariable('p_pore', 'f4', ('time', 'point'))
+        ds.createVariable('p_eff',  'f4', ('time', 'point'))
+        ds.createVariable('q',      'f4', ('time', 'point'))
+        ds.createVariable('u_r',    'f4', ('time', 'point'))
+        r_var[:] = self._inv_r
+        z_var[:] = self._inv_z
+        r_var.units = 'm';  r_var.long_name = 'Radial coordinate'
+        z_var.units = 'm';  z_var.long_name = 'Axial coordinate'
+        ds['time'].units     = 's'
+        ds['I1'].units       = 'Pa';   ds['I1'].long_name    = 'First stress invariant I1 = tr(sigma_total)'
+        ds['J2'].units       = 'Pa2';  ds['J2'].long_name    = 'Second deviatoric invariant J2 = 0.5*s:s'
+        ds['p_pore'].units   = 'Pa';   ds['p_pore'].long_name = 'Pore pressure'
+        ds['p_eff'].units    = 'Pa';   ds['p_eff'].long_name  = 'Effective mean stress p_eff = I1/3 + alpha*p_pore'
+        ds['q'].units        = 'Pa';   ds['q'].long_name      = 'Deviatoric stress q = sqrt(3*J2)'
+        ds['u_r'].units      = 'm';    ds['u_r'].long_name    = 'Radial displacement'
+        for k, v in [('E', self.cfg.materials.E), ('nu', self.cfg.materials.nu),
+                     ('alpha', self.cfg.materials.alpha), ('perm', self.cfg.materials.perm),
+                     ('visc', self.cfg.materials.visc), ('M', self.cfg.materials.M),
+                     ('Re', self.cfg.mesh.Re), ('H', self.cfg.mesh.H)]:
+            setattr(ds, k, v)
+        self._inv_ds  = ds
+        self._inv_idx = 0
+        print(f"✓ Invariants NC opened: {path}  ({n} sample points)")
+
+    def _append_invariants_record(self, time):
+        if self.comm.rank != 0:
+            return
+        pts    = self._inv_pts
+        cells  = self._inv_cells
+        srr    = self.sigma_rr_out.eval(pts, cells)[:, 0]
+        stt    = self.sigma_tt_out.eval(pts, cells)[:, 0]
+        szz    = self.sigma_zz_out.eval(pts, cells)[:, 0]
+        srz    = self.sigma_rz_out.eval(pts, cells)[:, 0]
+        p_pore = self.p_out.eval(pts, cells)[:, 0]
+        u_r    = self.u_out.eval(pts, cells)[:, 0]
+        alpha  = self.cfg.materials.alpha
+        I1     = srr + stt + szz
+        p_mean = I1 / 3.0
+        J2     = 0.5 * ((srr - p_mean)**2 + (stt - p_mean)**2 + (szz - p_mean)**2) + srz**2
+        p_eff  = p_mean + alpha * p_pore
+        q      = np.sqrt(np.maximum(3.0 * J2, 0.0))
+        i      = self._inv_idx
+        self._inv_ds['time'][i]      = time
+        self._inv_ds['I1'][i, :]     = I1
+        self._inv_ds['J2'][i, :]     = J2
+        self._inv_ds['p_pore'][i, :] = p_pore
+        self._inv_ds['p_eff'][i, :]  = p_eff
+        self._inv_ds['q'][i, :]      = q
+        self._inv_ds['u_r'][i, :]    = u_r
+        self._inv_ds.sync()
+        self._inv_idx += 1
+
+    def _close_invariants_nc(self):
+        if self.comm.rank != 0:
+            return
+        self._inv_ds.close()
+        print(f"✓ Invariants saved: {self.cfg.output.invariants_nc}")
+
     def _open_pressure_profile_nc(self):
         """Open NetCDF file for vertical line pressure profile."""
         if self.comm.rank != 0:
