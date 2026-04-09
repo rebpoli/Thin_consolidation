@@ -13,6 +13,8 @@ USAGE:
     python compare_13_14.py --max-time 500
 """
 import argparse
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
@@ -93,11 +95,11 @@ def _plot_pressure(ax, ds, **kw):
 
 
 def _plot_uz(ax, ds, **kw):
-    if ds is None or "uz_at_bottom" not in ds:
+    if ds is None or "uz_at_top" not in ds:
         return
     t, mk = _mask(ds)
     t = t[mk] / 60.0; pos = t > 0   # s → min
-    uz = ds["uz_at_bottom"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
+    uz = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
     ax.plot(t[pos], uz, **kw)
 
 
@@ -205,4 +207,3 @@ png_dir.mkdir(exist_ok=True)
 out = png_dir / "compare_13_14.png"
 plt.savefig(out, dpi=500)
 print(f"\nSaved {out}")
-plt.show()

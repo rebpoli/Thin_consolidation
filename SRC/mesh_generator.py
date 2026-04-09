@@ -75,85 +75,80 @@ class CylinderMesh:
 #         return domain, facets
 
     def _create_gmsh_mesh(self):
-        """Create orthogonal quadrilateral mesh with refinement near right boundary"""
+        """Create orthogonal quadrilateral mesh with geometric grading.
+
+        Grading rules (applied independently to r and z directions):
+          h_min  = L / (N * 10)                     finest element
+          n_ref  = N // 2   elements, geometric,    covering L/4  (refined zone)
+          n_crs  = N - n_ref elements, uniform,     covering 3L/4 (coarse zone)
+          r      = geometric ratio, bisected so sum of refined zone = L/4 exactly
+          h_crs  = (3L/4) / n_crs                   uniform coarse size
+
+        Refinement direction:
+          r (x): fine near r=Re (right/lateral boundary) — from_end=True
+          z (y): fine near z=0  (bottom symmetry plane)  — from_end=False
+        """
         import numpy as np
 
         Re = self.mesh_cfg.Re
-        H = self.mesh_cfg.H
-        N = self.mesh_cfg.N
+        H  = self.mesh_cfg.H
+        N  = self.mesh_cfg.N
 
-        # Mesh parameters
-        aspect_ratio = 100.0  # dX:dY ratio of the rectangles
-        refinement_factor = 0.6  # >1 = finer near left boundary
+        def _geometric_ratio(h_min, n_ref, L_ref, tol=1e-12):
+            """Bisect for r: h_min*(r^n_ref - 1)/(r-1) = L_ref."""
+            lo, hi = 1.0 + 1e-10, 1e6
+            for _ in range(200):
+                mid = (lo + hi) / 2.0
+                s   = h_min * (mid**n_ref - 1.0) / (mid - 1.0)
+                if s < L_ref:
+                    lo = mid
+                else:
+                    hi = mid
+                if hi - lo < tol:
+                    break
+            return (lo + hi) / 2.0
 
-        n_x = N # max(20, int(N / aspect_ratio))
-        n_y = n_x
+        def _make_coords(length, N, from_end=False):
+            """Build node coordinates for one direction."""
+            n_ref  = N // 2
+            n_crs  = N - n_ref
+            h_min  = length / (N * 10)
+            L_ref  = length / 6.0
+            L_crs  = length - L_ref
+            h_crs  = L_crs / n_crs
+
+            r = _geometric_ratio(h_min, n_ref, L_ref)
+
+            coords = [0.0]
+            h = h_min
+            for i in range(n_ref):
+                coords.append(coords[-1] + h)
+                h *= r
+            # Snap end of refined zone exactly to L/4
+            coords[n_ref] = L_ref
+
+            for _ in range(n_crs):
+                coords.append(coords[-1] + h_crs)
+            # Snap final point exactly to length
+            coords[-1] = length
+
+            arr = np.array(coords)
+            if from_end:
+                arr = length - arr[::-1]   # mirror: fine at far end
+            return arr
 
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
 
-        gdim = 2
+        gdim       = 2
         model_rank = 0
 
         gmsh.model.add("OrthogonalQuadMesh")
 
-        # ========================================================================
-        # Generate node coordinates with geometric progression in X
-        # ========================================================================
+        H_mesh = H / 2   # model only the top half; H is the full specimen height
 
-        def generate_x_coords(length, min_cell_length, max_cell_length, progression=1.5):
-            max_cells=1000
-            coords = [length]  # Start from the right
-            current_pos = length
-            cell_length = min_cell_length  # Start with min at the right
-            cell_count = 0
-            
-            while current_pos > 0:
-                cell_count += 1
-                if cell_count > max_cells:
-                    raise ValueError(f"Exceeded maximum number of cells ({max_cells}). "
-                                   f"Cannot generate mesh for length={length} with current parameters.")
-                
-                # Use the smaller of: current cell length or remaining distance
-                actual_length = min(cell_length, current_pos)
-                current_pos -= actual_length
-                coords.append(current_pos)
-                
-                # Grow cell length for next iteration, but cap at max
-                cell_length = min(cell_length * progression, max_cell_length)
-            
-            # Reverse to get coordinates from left to right (0 to length)
-            coords.reverse()
-            return np.array(coords)        
-
-        #
-        def generate_y_coords(length, min_cell_length, max_cell_length, progression=1.5):
-            max_cells = 1000
-            coords = [0.0]
-            current_pos = 0.0
-            cell_length = min_cell_length
-            cell_count = 0
-
-            while current_pos < length:
-                cell_count += 1
-                if cell_count > max_cells:
-                    raise ValueError(f"Exceeded maximum number of cells ({max_cells}). "
-                                   f"Cannot generate mesh for length={length} with current parameters.")
-
-                # Use the smaller of: current cell length or remaining distance
-                actual_length = min(cell_length, length - current_pos)
-                current_pos += actual_length
-                coords.append(current_pos)
-
-                # Grow cell length for next iteration, but cap at max
-                cell_length = min(cell_length * progression, max_cell_length)
-
-            return np.array(coords)
-
-        H_mesh   = H / 2   # model only the top half; H is the full specimen height
-        x_coords = generate_x_coords(Re, Re/N, 100*Re/N)
-        y_coords = generate_y_coords(H_mesh, H_mesh/N, 100*H_mesh/N)
-#         y_coords = np.linspace(0, H, n_y + 1)
+        x_coords = _make_coords(Re,     N, from_end=True)    # fine near r=Re
+        y_coords = _make_coords(H_mesh, N, from_end=True)   # fine near z=H_mesh (top/loaded face)
 
         # ========================================================================
         # Create structured grid of points
@@ -273,10 +268,13 @@ class CylinderMesh:
 
             print(f"✓ Mesh created: {num_cells} cells")
             print(f"  Cell type: {cell_type}")
-            print(f"  Grid: {n_x} × {n_y}")
-            print(f"  X spacing: {np.diff(x_coords).min():.6f} to {np.diff(x_coords).max():.6f}")
-            print(f"  Y spacing: {np.diff(y_coords)[0]:.6f}")
-            print(f"  Refinement factor: {refinement_factor}")
+            h_min_x = np.diff(x_coords).min()
+            h_max_x = np.diff(x_coords).max()
+            h_min_y = np.diff(y_coords).min()
+            h_max_y = np.diff(y_coords).max()
+            print(f"  Grid: {n_x} × {n_y}  (N={N})")
+            print(f"  R spacing: {h_min_x:.3e} … {h_max_x:.3e} m  (ratio {h_max_x/h_min_x:.1f}×)")
+            print(f"  Z spacing: {h_min_y:.3e} … {h_max_y:.3e} m  (ratio {h_max_y/h_min_y:.1f}×)")
 
             from dolfinx.mesh import CellType
             if cell_type == CellType.quadrilateral:

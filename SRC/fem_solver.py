@@ -514,8 +514,9 @@ class PoroelasticitySolver:
         ds.createVariable('I1',     'f4', ('time', 'point'))
         ds.createVariable('J2',     'f4', ('time', 'point'))
         ds.createVariable('p_pore', 'f4', ('time', 'point'))
-        ds.createVariable('p_eff',  'f4', ('time', 'point'))
-        ds.createVariable('q',      'f4', ('time', 'point'))
+        ds.createVariable('p_eff',   'f4', ('time', 'point'))
+        ds.createVariable('p_eff_t', 'f4', ('time', 'point'))
+        ds.createVariable('q',       'f4', ('time', 'point'))
         ds.createVariable('u_r',    'f4', ('time', 'point'))
         r_var[:] = self._inv_r
         z_var[:] = self._inv_z
@@ -525,8 +526,9 @@ class PoroelasticitySolver:
         ds['I1'].units       = 'Pa';   ds['I1'].long_name    = 'First stress invariant I1 = tr(sigma_total)'
         ds['J2'].units       = 'Pa2';  ds['J2'].long_name    = 'Second deviatoric invariant J2 = 0.5*s:s'
         ds['p_pore'].units   = 'Pa';   ds['p_pore'].long_name = 'Pore pressure'
-        ds['p_eff'].units    = 'Pa';   ds['p_eff'].long_name  = 'Effective mean stress p_eff = I1/3 + alpha*p_pore'
-        ds['q'].units        = 'Pa';   ds['q'].long_name      = 'Deviatoric stress q = sqrt(3*J2)'
+        ds['p_eff'].units    = 'Pa';   ds['p_eff'].long_name   = 'Biot effective mean stress = I1/3 + alpha*p_pore'
+        ds['p_eff_t'].units  = 'Pa';   ds['p_eff_t'].long_name = 'Terzaghi effective mean stress = I1/3 + p_pore (alpha=1)'
+        ds['q'].units        = 'Pa';   ds['q'].long_name       = 'Deviatoric stress q = sqrt(3*J2)'
         ds['u_r'].units      = 'm';    ds['u_r'].long_name    = 'Radial displacement'
         for k, v in [('E', self.cfg.materials.E), ('nu', self.cfg.materials.nu),
                      ('alpha', self.cfg.materials.alpha), ('perm', self.cfg.materials.perm),
@@ -552,14 +554,16 @@ class PoroelasticitySolver:
         I1     = srr + stt + szz
         p_mean = I1 / 3.0
         J2     = 0.5 * ((srr - p_mean)**2 + (stt - p_mean)**2 + (szz - p_mean)**2) + srz**2
-        p_eff  = p_mean + alpha * p_pore
-        q      = np.sqrt(np.maximum(3.0 * J2, 0.0))
-        i      = self._inv_idx
-        self._inv_ds['time'][i]      = time
-        self._inv_ds['I1'][i, :]     = I1
-        self._inv_ds['J2'][i, :]     = J2
-        self._inv_ds['p_pore'][i, :] = p_pore
-        self._inv_ds['p_eff'][i, :]  = p_eff
+        p_eff   = p_mean + alpha * p_pore
+        p_eff_t = p_mean + p_pore            # Terzaghi: alpha=1
+        q       = np.sqrt(np.maximum(3.0 * J2, 0.0))
+        i       = self._inv_idx
+        self._inv_ds['time'][i]       = time
+        self._inv_ds['I1'][i, :]      = I1
+        self._inv_ds['J2'][i, :]      = J2
+        self._inv_ds['p_pore'][i, :]  = p_pore
+        self._inv_ds['p_eff'][i, :]   = p_eff
+        self._inv_ds['p_eff_t'][i, :] = p_eff_t
         self._inv_ds['q'][i, :]      = q
         self._inv_ds['u_r'][i, :]    = u_r
         self._inv_ds.sync()

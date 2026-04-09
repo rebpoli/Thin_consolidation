@@ -68,13 +68,15 @@ class VerticalLineSampler:
         r_coords = dof_coords[:, 0]
         z_coords = dof_coords[:, 1]
         
-        # Find DOFs close to r=0 (within 1% of domain radius)
-        r_tolerance = 0.01 * self.cfg.mesh.Re
-        r_mask = np.abs(r_coords) < r_tolerance
-        
-        if np.sum(r_mask) == 0:
-            # Fallback: just use closest r values
-            r_mask = np.abs(r_coords) < np.percentile(np.abs(r_coords), 10)
+        # Find DOFs exactly on the axis r=0.
+        # Tolerance = half the smallest non-zero r so only the r=0 column is
+        # captured regardless of mesh refinement level.
+        r_positive = r_coords[r_coords > 0]
+        if len(r_positive) > 0:
+            r_tolerance = r_positive.min() / 2.0
+        else:
+            r_tolerance = 1e-10
+        r_mask = r_coords < r_tolerance
         
         # Get z-coordinates and indices for centerline DOFs
         centerline_z = z_coords[r_mask]

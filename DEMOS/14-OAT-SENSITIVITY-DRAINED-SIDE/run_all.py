@@ -63,7 +63,7 @@ _visc  = 1.0e-3          # water viscosity
 _Kf    = 2.2e9           # water bulk modulus
 _H     = 0.010           # full specimen height [m] (mesh spans 0 to H/2)
 _Re    = 0.025           # radius [m]
-_N     = 80              # mesh elements
+_N     = 30              # approx cells per direction; N/2 geometric in L/6, N/2 uniform in 5L/6
 _mu    = _E / (2 * (1 + _nu))
 
 # Base case parameters
@@ -154,6 +154,7 @@ def _make_config(label, perm, alpha, phi):
             "bottom": {"U_z": 0.0},              # vertical symmetry plane: no vertical displacement, zero flux
             "top":    {
                 "Pressure":      0.0,            # drained face
+                "U_r":           0.0,            # no lateral displacement (rigid plate)
                 "U_z_rigid":     1,              # rigid plate
                 "periodic_load": _load_block(),
             },
@@ -163,7 +164,7 @@ def _make_config(label, perm, alpha, phi):
         "numerical": {
             "theta_cn":    0.75,
             "end_time_tv": _end_time_tv(perm, alpha, phi),
-            "dt_min_s":    0.01,
+            "dt_min_s":    0.001,
             "dt_max_s":    600.0,
             "dt_factor":   1.5,
         },

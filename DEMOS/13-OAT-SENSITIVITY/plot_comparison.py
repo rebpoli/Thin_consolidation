@@ -9,6 +9,8 @@ USAGE:
     ./plot_comparison.py --max-time 500
 """
 import argparse
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
@@ -129,12 +131,12 @@ def _plot_pressure(ax, ds, color, label, max_time=None):
 
 
 def _plot_uz(ax, ds, color, label, max_time=None):
-    if ds is None or "uz_at_bottom" not in ds:
+    if ds is None or "uz_at_top" not in ds:
         return
     t, mk = _mask(ds, min_time, max_time)
     t_plot = t[mk] / 60.0   # s → min
     pos = t_plot > 0
-    uz  = ds["uz_at_bottom"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
+    uz  = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
     ax.plot(t_plot[pos], uz, color=color, linewidth=1.5, label=label, zorder=3)
 
 
@@ -211,4 +213,3 @@ png_dir.mkdir(exist_ok=True)
 out = png_dir / "oat_sensitivity.png"
 plt.savefig(out, dpi=500)
 print(f"\nSaved {out}")
-plt.show()
