@@ -14,7 +14,7 @@ Three independent sweeps:
 
 Geometry  : Re=0.025 m, H=0.005 m
 Materials : E=3e9, nu=0.2, visc=1e-3 (water)
-Load      : single step to −10 MPa at t_start=50 s, held to t_end=3600 s
+Load      : single step to −10 MPa at t_start=50 s, held to t_end=36000 s
 """
 
 import sys, time, subprocess, yaml, io, re
@@ -61,7 +61,7 @@ _E     = 3.0e9
 _nu    = 0.2
 _visc  = 1.0e-3          # water viscosity
 _Kf    = 2.2e9           # water bulk modulus
-_H     = 0.005           # half-height [m]
+_H     = 0.010           # full specimen height [m] (mesh spans 0 to H/2)
 _Re    = 0.025           # radius [m]
 _N     = 80              # mesh elements
 _mu    = _E / (2 * (1 + _nu))
@@ -75,7 +75,7 @@ _PERM_BASE  = 1.0e-20
 _L0      = 0.0
 _L1      = -10.0e6       # −10 MPa step load
 _T_START = 50.0          # ramp-up time [s]
-_T_END   = 3600.0        # physical end time [s] = 1 hour
+_T_END   = 36000.0       # physical end time [s] = 10 hours
 
 # Sweep values
 PHI_VALUES   = np.array([0.05, 0.10, 0.15, 0.20, 0.25, 0.30])
@@ -98,8 +98,9 @@ def _cv(perm, alpha, phi):
 
 
 def _end_time_tv(perm, alpha, phi):
-    cv = _cv(perm, alpha, phi)
-    return float(cv * _T_END / (4 * _H**2))
+    cv   = _cv(perm, alpha, phi)
+    H_dr = _H / 2   # drainage path = half of full specimen height
+    return float(cv * _T_END / H_dr**2)
 
 
 def _fmt_perm(v):
@@ -113,7 +114,7 @@ def _load_block():
         "L0":          _L0,
         "L1":          _L1,
         "t_start":     _T_START,
-        "period":      7200.0,   # > t_end − t_start; never completes within simulation
+        "period":      72000.0,  # > t_end − t_start; never completes within simulation
         "duty_cycle":  1.0,
         "n_periods":   -1,       # infinite → stays at L1 forever after t_start
     }
@@ -150,21 +151,20 @@ def _make_config(label, perm, alpha, phi):
             "M":     float(M),
         },
         "boundary_conditions": {
-            "bottom": {
-                "Pressure":      0.0,
-                "U_r":           0.0,
-                "U_z_rigid":     1,
+            "bottom": {"U_z": 0.0},              # vertical symmetry plane: no vertical displacement, zero flux
+            "top":    {
+                "Pressure":      0.0,            # drained face
+                "U_z_rigid":     1,              # rigid plate
                 "periodic_load": _load_block(),
             },
-            "top":   {"U_z": 0.0},
-            "right": {"Pressure": 0.0},   # drained side, mechanically free
-            "left":  {"U_r": 0.0},
+            "right":  {"Pressure": 0.0},         # drained side, mechanically free
+            "left":   {"U_r": 0.0},             # axis of symmetry
         },
         "numerical": {
             "theta_cn":    0.75,
             "end_time_tv": _end_time_tv(perm, alpha, phi),
             "dt_min_s":    0.01,
-            "dt_max_s":    20.0,
+            "dt_max_s":    600.0,
             "dt_factor":   1.5,
         },
         "output": {
@@ -304,7 +304,7 @@ def main():
     print(f"  logs    : {LOG_DIR.relative_to(DEMO_DIR)}/")
     print(f"  base    : phi={_PHI_BASE}, alpha={_ALPHA_BASE}, perm={_fmt_perm(_PERM_BASE)}")
     print(f"  E={_E:.1e} Pa   nu={_nu}   Kf={_Kf:.1e} Pa   M=Kf/phi")
-    print(f"  H={_H*100:.1f} cm   Re={_Re*100:.1f} cm   t_end={_T_END:.0f} s (1 h)")
+    print(f"  H={_H*100:.1f} cm   Re={_Re*100:.1f} cm   t_end={_T_END:.0f} s (10 h)")
     for s, n in n_by_sweep.items():
         print(f"  {s} sweep: {n} cases")
     print()

@@ -48,19 +48,41 @@ RUNS_DIR = DEMO_DIR / "runs"
 parser = argparse.ArgumentParser(description="Demo 14 P-Q invariant plot")
 parser.add_argument("--run",  default=None,
                     help="Single run label to plot (default: all runs)")
-parser.add_argument("--phi",  type=float, default=40.0,
-                    help="MC friction angle [deg] (default: 40 — carbonate)")
-parser.add_argument("--coh",  type=float, default=10.0,
-                    help="MC cohesion [MPa] (default: 10 — carbonate)")
+parser.add_argument("--phi",  type=float, default=30.0,
+                    help="MC friction angle [deg] (default: 30)")
+parser.add_argument("--ucs",  type=float, default=None,
+                    help="UCS [MPa] for MC envelope (default: computed from data — "
+                         "max UCS at which 5%% of domain is outside)")
 parser.add_argument("--p-max", type=float, default=None,
                     help="Max -p' for MC envelope [MPa] (default: auto)")
 parser.add_argument("--snap-time", type=float, default=120.0,
                     help="Physical time [s] for spatial snapshot (default: 120 s ≈ 2 min)")
 args = parser.parse_args()
 
-phi_deg      = args.phi
-cohesion_MPa = args.coh
-phi_rad      = np.radians(phi_deg)
+phi_deg = args.phi
+phi_rad = np.radians(phi_deg)
+
+# Envelope coefficients (φ-only) — same as table_ucs_failure.py
+_C2_env = 6.0 * np.sin(phi_rad) / (3.0 - np.sin(phi_rad))
+_K_env  = 3.0 * (1.0 - np.sin(phi_rad)) / (3.0 - np.sin(phi_rad))
+
+
+def _compute_critical_ucs(p_eff_Pa, q_Pa, fraction=0.05):
+    """Return max over timesteps of the UCS at which `fraction` of points are outside.
+
+    p_eff_Pa : (n_t, n_pt)  effective mean stress [Pa], negative = compression
+    q_Pa     : (n_t, n_pt)  deviatoric stress [Pa]
+    """
+    p = -p_eff_Pa / 1e6   # Cambridge +compression [MPa]
+    q =  q_Pa     / 1e6   # [MPa]
+    pct = (1.0 - fraction) * 100   # 95th for 5%
+    ucs_max = -np.inf
+    for i in range(q.shape[0]):
+        ucs_crit = (q[i] - _C2_env * p[i]) / _K_env
+        ucs_5pct = float(np.percentile(ucs_crit, pct))
+        if ucs_5pct > ucs_max:
+            ucs_max = ucs_5pct
+    return max(ucs_max, 0.0)   # never negative
 
 # ── Collect run labels ────────────────────────────────────────────────────────
 if args.run:
@@ -83,7 +105,7 @@ def _mc_envelope(phi_rad, coh_MPa, p_max_MPa, npoints=300):
     C2 = 6.0 * np.sin(phi_rad)             / (3.0 - np.sin(phi_rad))
     p_pos = np.linspace(0, p_max_MPa, npoints)
     q_env = C1 + C2 * p_pos
-    print(f"MC envelope: φ={np.degrees(phi_rad):.1f}°, c={coh_MPa:.1f} MPa "
+    print(f"MC envelope: φ={np.degrees(phi_rad):.1f}°, c={coh_MPa:.2f} MPa "
           f"→ C1={C1:.3f} MPa, C2={C2:.4f}")
     return p_pos, q_env
 
@@ -96,6 +118,7 @@ def _plot_run(run_label):
 
     ds     = xr.open_dataset(nc_path)
     Re     = float(ds.attrs.get("Re", 0.025))
+    H      = float(ds.attrs.get("H",  0.010))   # full specimen height [m]
     time   = ds["time"].values            # [s]
     r      = ds["r"].values               # [m]
     z      = ds["z"].values               # [m]
@@ -110,6 +133,13 @@ def _plot_run(run_label):
     time_flat = time_mat.ravel() / 60.0   # minutes
     p_flat    = p.ravel()
     q_flat    = q.ravel()
+
+    # UCS: use CLI override if given, otherwise compute from data
+    if args.ucs is not None:
+        ucs_MPa = args.ucs
+    else:
+        ucs_MPa = _compute_critical_ucs(ds["p_eff"].values, ds["q"].values)
+    cohesion_MPa = ucs_MPa * (1.0 - np.sin(phi_rad)) / (2.0 * np.cos(phi_rad))
 
     p_max_env = args.p_max if args.p_max else 15.0
     p_env, q_env = _mc_envelope(phi_rad, cohesion_MPa, p_max_env)
@@ -143,8 +173,9 @@ def _plot_run(run_label):
                     c=time_flat, cmap="jet", norm=norm,
                     alpha=0.12, s=8, edgecolors="none", rasterized=True)
 
-    ax.plot(p_env, q_env, color="k", ls="--", lw=0.8, label="MC envelope")
-    ax.fill_between(p_env, q_env, q_env.max() * 1.05, color="k", alpha=0.10)
+    ax.plot(p_env, q_env, color="k", ls="--", lw=0.8,
+            label=f"MC: $\\varphi={phi_deg:.0f}^{{\\circ}}$, UCS$={ucs_MPa:.0f}$ MPa ($c={cohesion_MPa:.1f}$ MPa)")
+    ax.fill_between(p_env, q_env, 1e9, color="k", alpha=0.10)
     ax.set_xlim(0.0, 15.0)
     ax.set_ylim(0.0, 30.0)
     ax.set_xlabel("$-p' = -(I_1/3 + \\alpha\\,p_{\\rm pore})$ (MPa)")
@@ -175,13 +206,15 @@ def _plot_run(run_label):
     pp_2d = pp_snap.reshape(n_z, n_r)
     ur_2d = ur_snap.reshape(n_z, n_r)
 
+    P_MIN = 1e-4   # 0.1 kPa in MPa — lower limit for pressure colormaps
     pm_p  = ax_p.pcolormesh(R_mm, Z_mm, p_2d,  cmap="coolwarm",
-                             vmin=0, vmax=6.0,
+                             vmin=P_MIN, vmax=6.0,
                              shading="gouraud", rasterized=True)
     pm_q  = ax_q.pcolormesh(R_mm, Z_mm, q_2d,  cmap="coolwarm",
                              vmin=0, vmax=10.0,
                              shading="gouraud", rasterized=True)
     pm_pp = ax_pp.pcolormesh(R_mm, Z_mm, pp_2d, cmap="coolwarm",
+                              vmin=P_MIN,
                               shading="gouraud", rasterized=True)
     pm_ur = ax_ur.pcolormesh(R_mm, Z_mm, ur_2d, cmap="coolwarm",
                               vmin=ur_2d.min(), vmax=ur_2d.max(),
@@ -198,14 +231,13 @@ def _plot_run(run_label):
         _ax.set_xlabel("$r$ (mm)" if _show_x else "")
         _ax.set_ylabel("$z$ (mm)" if _show_y else "")
         _ax.set_title(_title, pad=6)
-        _ax.invert_xaxis()
         _ax.invert_yaxis()
 
     fig.suptitle(
         f"Demo 14 — $p$-$q$ space  |  run: {run_label}  |  "
-        f"MC: $\\varphi={phi_deg:.0f}^{{\\circ}}$, $c={cohesion_MPa:.0f}$ MPa (carbonate)\n"
-        f"$R_e={Re*1000:.1f}$ mm  |  {n_pt} pts $\\times$ {n_t} steps  |  "
-        f"$t_{{\\rm end}}={vmax:.0f}$ min",
+        f"MC: $\\varphi={phi_deg:.0f}^{{\\circ}}$, UCS$={ucs_MPa:.0f}$ MPa → $c={cohesion_MPa:.1f}$ MPa\n"
+        f"$R_e={Re*1000:.1f}$ mm, $H={H*1000:.1f}$ mm ($H/2={H*500:.1f}$ mm drainage path)  |  "
+        f"{n_pt} pts $\\times$ {n_t} steps  |  $t_{{\\rm end}}={vmax:.0f}$ min",
         fontsize=9, y=0.98)
 
     png_dir = DEMO_DIR / "png"
@@ -216,6 +248,14 @@ def _plot_run(run_label):
     print(f"  Saved {out}")
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-for label in run_labels:
-    _plot_run(label)
+# ── Main loop (parallel) ──────────────────────────────────────────────────────
+import multiprocessing as mp
+
+if __name__ == "__main__":
+    n_workers = min(len(run_labels), mp.cpu_count())
+    print(f"Using {n_workers} worker(s) for {len(run_labels)} run(s)")
+    if n_workers > 1:
+        with mp.Pool(n_workers) as pool:
+            pool.map(_plot_run, run_labels)
+    else:
+        _plot_run(run_labels[0])

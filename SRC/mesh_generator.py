@@ -150,8 +150,9 @@ class CylinderMesh:
 
             return np.array(coords)
 
+        H_mesh   = H / 2   # model only the top half; H is the full specimen height
         x_coords = generate_x_coords(Re, Re/N, 100*Re/N)
-        y_coords = generate_y_coords(H, H/N, 100*H/N)
+        y_coords = generate_y_coords(H_mesh, H_mesh/N, 100*H_mesh/N)
 #         y_coords = np.linspace(0, H, n_y + 1)
 
         # ========================================================================

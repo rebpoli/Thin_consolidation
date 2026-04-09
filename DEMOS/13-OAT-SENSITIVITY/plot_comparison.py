@@ -23,8 +23,8 @@ RUNS_DIR = DEMO_DIR / "runs"
 parser = argparse.ArgumentParser(description="Demo 13 OAT sensitivity plot")
 parser.add_argument("--min-time", type=float, default=49.0,
                     help="Minimum time to plot [s] (default: 49 — just before load step)")
-parser.add_argument("--max-time", type=float, default=None,
-                    help="Maximum time to plot [s]")
+parser.add_argument("--max-time", type=float, default=20000.0,
+                    help="Maximum time to plot [s] (default: 20000)")
 args = parser.parse_args()
 min_time = args.min_time
 max_time = args.max_time
@@ -41,16 +41,16 @@ def _fmt_perm(v):
 SWEEPS = {
     "phi":   {"labels": [f"phi_{v:.2f}"   for v in PHI_VALUES],
               "values": PHI_VALUES,
-              "fmt":    lambda v: f"φ={v:.0%}",
-              "title":  "φ sweep  (α=0.50, k=1e-20 m²)"},
+              "fmt":    lambda v: f"$\\phi={v*100:.0f}$%",
+              "title":  "$\\phi$ sweep  ($\\alpha=0.50$, $k=10^{-20}$ m²)"},
     "alpha": {"labels": [f"alpha_{v:.2f}" for v in ALPHA_VALUES],
               "values": ALPHA_VALUES,
-              "fmt":    lambda v: f"α={v:.2f}",
-              "title":  "α sweep  (φ=0.10, k=1e-20 m²)"},
+              "fmt":    lambda v: f"$\\alpha={v:.2f}$",
+              "title":  "$\\alpha$ sweep  ($\\phi=0.10$, $k=10^{-20}$ m²)"},
     "perm":  {"labels": [f"perm_{_fmt_perm(v)}" for v in PERM_VALUES],
               "values": PERM_VALUES,
-              "fmt":    lambda v: f"k={_fmt_perm(v)} m²",
-              "title":  "k sweep  (φ=0.10, α=0.50)"},
+              "fmt":    lambda v: f"$k={_fmt_perm(v)}$ m²",
+              "title":  "$k$ sweep  ($\\phi=0.10$, $\\alpha=0.50$)"},
 }
 SWEEP_ORDER = ["phi", "alpha", "perm"]
 N_COLS = 3
@@ -115,16 +115,16 @@ def _plot_pressure(ax, ds, color, label, max_time=None):
     if ds is None:
         return
     t, mk = _mask(ds, min_time, max_time)
-    t = t[mk]
-    pos = t > 0          # skip t=0 for log-x axis
+    t = t[mk] / 60.0   # s → min
+    pos = t > 0
     if "pressure_mean" in ds and "pressure_p10" in ds and "pressure_p90" in ds:
-        p_mean = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-6, None)
-        p_p10  = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-6, None)
-        p_p90  = np.clip(ds["pressure_p90"].values[mk][pos]  / 1e3, 1e-6, None)
+        p_mean = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
+        p_p10  = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-1, None)
+        p_p90  = np.clip(ds["pressure_p90"].values[mk][pos]  / 1e3, 1e-1, None)
         ax.plot(t[pos], p_mean, color=color, linewidth=1.5, label=label, zorder=3)
         ax.fill_between(t[pos], p_p10, p_p90, color=color, alpha=0.20, linewidth=0, zorder=2)
     elif "pressure_at_top" in ds:
-        p = np.clip(ds["pressure_at_top"].values[mk][pos] / 1e3, 1e-6, None)
+        p = np.clip(ds["pressure_at_top"].values[mk][pos] / 1e3, 1e-1, None)
         ax.plot(t[pos], p, color=color, linewidth=1.5, linestyle="--", label=label, zorder=3)
 
 
@@ -132,9 +132,9 @@ def _plot_uz(ax, ds, color, label, max_time=None):
     if ds is None or "uz_at_bottom" not in ds:
         return
     t, mk = _mask(ds, min_time, max_time)
-    t_plot = t[mk]
-    pos = t_plot > 0     # skip t=0 for log-x axis
-    uz  = ds["uz_at_bottom"].values[mk][pos] * 1e6   # m → μm
+    t_plot = t[mk] / 60.0   # s → min
+    pos = t_plot > 0
+    uz  = ds["uz_at_bottom"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
     ax.plot(t_plot[pos], uz, color=color, linewidth=1.5, label=label, zorder=3)
 
 
@@ -142,16 +142,18 @@ def _draw_load(ax, ds, max_time=None):
     if ds is None or "sig_zz_applied" not in ds:
         return
     t, mk = _mask(ds, min_time, max_time)
-    t_plot = t[mk]
+    t_plot = t[mk] / 60.0   # s → min
     sig    = ds["sig_zz_applied"].values[mk] / 1e6
-    # Skip t=0 for log-x; start from first positive time
     pos = t_plot > 0
     ax.step(t_plot[pos], sig[pos], color="crimson", linewidth=1.0, where="post", zorder=2)
     ax.fill_between(t_plot[pos], sig[pos], step="post", color="crimson", alpha=0.15, zorder=1)
     ax.set_xscale("log")
-    ax.set_ylabel("σ_zz [MPa]", fontsize=7, labelpad=2)
-    ax.set_xlabel("Time [s]", fontsize=8)
-    ax.tick_params(labelsize=7)
+    ax.set_ylabel("$\\sigma_{zz}$ [MPa]", fontsize=7, labelpad=2)
+    ax.set_xlabel("Time [min]", fontsize=8)
+    ax.tick_params(which="both", labelsize=7)
+    ax.xaxis.set_major_locator(plt.LogLocator(base=10, subs=[1, 2, 5]))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:g}"))
+    ax.xaxis.set_minor_locator(plt.NullLocator())
     ax.grid(True, which="both", alpha=0.25, zorder=0)
     ax.yaxis.set_major_locator(plt.MaxNLocator(3))
 
@@ -172,8 +174,10 @@ for c, sw in enumerate(SWEEP_ORDER):
     # Pressure axis — log-log
     ax_p[c].set_yscale("log")
     ax_p[c].set_xscale("log")
+    ax_p[c].set_ylim(bottom=1e-1)
     ax_p[c].set_ylabel("Pressure [kPa]", fontsize=8)
-    ax_p[c].tick_params(labelsize=7, labelbottom=False)
+    ax_p[c].tick_params(which="both", labelsize=7)
+    plt.setp(ax_p[c].get_xticklabels(which="both"), visible=False)
     ax_p[c].grid(True, which="both", alpha=0.25, zorder=0)
     ax_p[c].set_title(spec["title"], fontsize=9, pad=4)
     ax_p[c].legend(fontsize=6, loc="upper right", framealpha=0.7,
@@ -181,8 +185,9 @@ for c, sw in enumerate(SWEEP_ORDER):
 
     # uz axis — log time
     ax_uz[c].set_xscale("log")
-    ax_uz[c].set_ylabel("u_z [μm]", fontsize=8)
-    ax_uz[c].tick_params(labelsize=7, labelbottom=False)
+    ax_uz[c].set_ylabel("$u_z$ (total displacement) [μm]", fontsize=8)
+    ax_uz[c].tick_params(which="both", labelsize=7)
+    plt.setp(ax_uz[c].get_xticklabels(which="both"), visible=False)
     ax_uz[c].grid(True, which="both", alpha=0.25, zorder=0)
     if c == 0:
         ax_uz[c].legend(fontsize=6, loc="lower right", framealpha=0.7,
@@ -196,7 +201,7 @@ for c, sw in enumerate(SWEEP_ORDER):
 fig.suptitle(
     "Demo 13 — OAT Sensitivity  |  "
     "E=3 GPa, ν=0.2, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
-    "H=0.5 cm, Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
+    "H=1.0 cm (H/2=0.5 cm drainage path), Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
     "base: φ=0.10, α=0.50, k=1e-20 m²",
     fontsize=9)
 

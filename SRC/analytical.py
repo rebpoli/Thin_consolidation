@@ -20,7 +20,7 @@ class Analytical1DConsolidation:
         self.times = self.numerical_cfg.expected_time_list()
         
         self.n_z     = n_spatial_points
-        self.z_coords = np.linspace(0, self.mesh_cfg.H, self.n_z)
+        self.z_coords = np.linspace(0, self.mesh_cfg.H / 2, self.n_z)
 
         self._compute_derived_properties()
         
@@ -56,24 +56,24 @@ class Analytical1DConsolidation:
     def _pressure(self, t: float, z: float) -> float:
         if t == 0:
             return self.p0
-        
-        H    = self.mesh_cfg.H
+
+        H_dr = self.mesh_cfg.H / 2   # drainage path = half of full specimen height
         c_v  = self.material_cfg.c_v
 
-        T_v = c_v * t / (H**2) / 4
-        
+        T_v = c_v * t / (H_dr**2) / 4
+
         # Ref: Cheng,2016
         F1 = 0.0
         for n in range(50):
             m = (2*n + 1) * np.pi / 2
-            F1 += (2.0 / m) * np.sin(m * z / H) * np.exp(-4*m**2 * T_v)
-        
+            F1 += (2.0 / m) * np.sin(m * z / H_dr) * np.exp(-4*m**2 * T_v)
+
         return self.p0 * F1
     
     #
     #
     def _uz(self, t: float, z: float) -> float:
-        H = self.mesh_cfg.H
+        H_dr  = self.mesh_cfg.H / 2   # drainage path = half of full specimen height
         S     = self.material_cfg.S
         K_u   = self.material_cfg.K_u
         nu_u  = self.material_cfg.nu_u
@@ -81,40 +81,37 @@ class Analytical1DConsolidation:
         mu    = self.material_cfg.mu
         eta   = self.material_cfg.eta
         c_v   = self.material_cfg.c_v
-        
-        T_v = c_v * t / (H**2) / 4
-#         print(f"t=>t*: {t} => {T_v}")
-        
+
+        T_v = c_v * t / (H_dr**2) / 4
+
         # Ref: Cheng,2016
         F2 = 0.0
         for n in range(50):
             m = (2*n + 1) * np.pi / 2
-            F2 += (2.0 / m**2) * np.cos(m * z / H) * (1 - np.exp(-4*m**2 * T_v))
+            F2 += (2.0 / m**2) * np.cos(m * z / H_dr) * (1 - np.exp(-4*m**2 * T_v))
 
-#         print(f"t*:{T_v} z*:{z/H} => F2={F2} p0:{self.p0}")
-        
-        uz  = -self.sig0 * H / 2 / mu * (1-2*nu_u) / (1-nu_u) * ( 1 - z/H )
-        uz += -self.sig0 * H * F2 * ( nu_u - nu ) / ( 2 * mu ) / ( 1 - nu_u ) / ( 1 - nu )
-        
+        uz  = -self.sig0 * H_dr / 2 / mu * (1-2*nu_u) / (1-nu_u) * ( 1 - z/H_dr )
+        uz += -self.sig0 * H_dr * F2 * ( nu_u - nu ) / ( 2 * mu ) / ( 1 - nu_u ) / ( 1 - nu )
+
         return uz
     
     #
     #
     def _V_drained( self, time ) :
-        H    = self.mesh_cfg.H
-        Re   = self.mesh_cfg.Re
-        c_v  = self.material_cfg.c_v
+        H_dr  = self.mesh_cfg.H / 2   # drainage path = half of full specimen height
+        Re    = self.mesh_cfg.Re
+        c_v   = self.material_cfg.c_v
         perm  = self.material_cfg.perm
         visc  = self.material_cfg.visc
-        p0 = self.p0
+        p0    = self.p0
 
-        t_s = c_v * time / (4 * H**2)  
+        t_s = c_v * time / (4 * H_dr**2)
         F = 0.0
         for n in range(500):
             m = (2*n + 1) * np.pi
             F += (1.0 / m**2) * (1.0 - np.exp(-m**2 * t_s))
 
-        vd = np.pi * Re**2 * (perm/visc) * (2*p0/H) * (4*H**2/c_v) * F
+        vd = np.pi * Re**2 * (perm/visc) * (2*p0/H_dr) * (4*H_dr**2/c_v) * F
 
         return vd
 
@@ -136,7 +133,7 @@ class Analytical1DConsolidation:
     
     #
     #
-    def pressure_at_top(self, t: float) -> float: return self._pressure(t,self.mesh_cfg.H)
+    def pressure_at_top(self, t: float) -> float: return self._pressure(t, self.mesh_cfg.H / 2)
     def uz_at_bottom(self, t: float) -> float: return self._uz(t,0)
     def volume_drained(self, t: float) -> float: return self._V_drained(t)
     
@@ -172,13 +169,13 @@ class Analytical1DConsolidation:
                 if t == 0:
                     result[:] = self.p0
                 else:
-                    H = self.mesh_cfg.H
-                    T_v = self.c_v * t / (H**2)
-                    
+                    H_dr = self.mesh_cfg.H / 2
+                    T_v = self.c_v * t / (H_dr**2)
+
                     for n in range(50):
                         m = (2*n + 1) * np.pi / 2
-                        result += (2.0 / m) * np.sin(m * z_vals / H) * np.exp(-m**2 * T_v)
-                    
+                        result += (2.0 / m) * np.sin(m * z_vals / H_dr) * np.exp(-m**2 * T_v)
+
                     result *= self.p0
                 
                 return result
@@ -186,21 +183,21 @@ class Analytical1DConsolidation:
             def uz_expr(x):
                 z_vals = x[1]
                 n_points = len(z_vals)
-                H = self.mesh_cfg.H
-                
+                H_dr = self.mesh_cfg.H / 2
+
                 if t == 0:
                     return -self.eta * self.p0 * z_vals / self.K_u
-                
-                T_v = self.c_v * t / (H**2)
-                
-                uz_final = -self.p0 * H / self.K_u * (self.eta + self.S * self.K_u * (1 - z_vals/H))
-                
+
+                T_v = self.c_v * t / (H_dr**2)
+
+                uz_final = -self.p0 * H_dr / self.K_u * (self.eta + self.S * self.K_u * (1 - z_vals/H_dr))
+
                 sum_term = np.zeros(n_points)
                 for n in range(50):
                     m = (2*n + 1) * np.pi / 2
-                    sum_term += (2.0 / m**2) * np.sin(m * z_vals / H) * (1 - np.exp(-m**2 * T_v))
-                
-                uz_time = self.p0 * H / self.K_u * sum_term
+                    sum_term += (2.0 / m**2) * np.sin(m * z_vals / H_dr) * (1 - np.exp(-m**2 * T_v))
+
+                uz_time = self.p0 * H_dr / self.K_u * sum_term
                 
                 return uz_final + uz_time
             

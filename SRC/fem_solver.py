@@ -279,20 +279,20 @@ class PoroelasticitySolver:
     #
     #
     def _compute_pressure_at_top(self):
-        H = self.cfg.mesh.H
+        H_mesh = self.cfg.mesh.H / 2   # mesh top = half of full specimen height
 
         # Get pressure subspace and collapse
         p_space, p_map = self.W.sub(1).collapse()
-        
+
         # Extract pressure values
         p_values = self.wh.x.array[p_map]
-        
+
         # Get DOF coordinates for pressure space
         dof_coords = p_space.tabulate_dof_coordinates()
         z_coords = dof_coords[:, 1]
-        
-        # Find nodes at top (z ≈ 0)
-        top_mask = np.abs(z_coords-H) < 1e-10
+
+        # Find nodes at top (z ≈ H_mesh)
+        top_mask = np.abs(z_coords - H_mesh) < 1e-10
         
         if np.any(top_mask):
             return np.max(p_values[top_mask])
@@ -333,12 +333,12 @@ class PoroelasticitySolver:
         return 0.0
 
     def _compute_uz_at_top(self):
-        H = self.cfg.mesh.H
+        H_mesh = self.cfg.mesh.H / 2   # mesh top = half of full specimen height
         uz_space, uz_map = self.W.sub(0).sub(1).collapse()
         uz_values = self.wh.x.array[uz_map]
         dof_coords = uz_space.tabulate_dof_coordinates()
         z_coords = dof_coords[:, 1]
-        top_mask = np.abs(z_coords - H) < 1e-10
+        top_mask = np.abs(z_coords - H_mesh) < 1e-10
         if np.any(top_mask):
             return np.mean(uz_values[top_mask])
         return 0.0
@@ -463,16 +463,16 @@ class PoroelasticitySolver:
         """Build a spatially uniform grid and locate the containing cell for each point."""
         from dolfinx.geometry import bb_tree, compute_collisions_points, compute_colliding_cells
 
-        n   = self.cfg.output.n_invariant_points
-        Re  = self.cfg.mesh.Re
-        H   = self.cfg.mesh.H
+        n      = self.cfg.output.n_invariant_points
+        Re     = self.cfg.mesh.Re
+        H_mesh = self.cfg.mesh.H / 2   # mesh height = half of full specimen height
 
         # Regular grid with aspect ratio matching the domain
-        ratio = Re / H
+        ratio = Re / H_mesh
         n_z   = max(2, round(np.sqrt(n / ratio)))
         n_r   = max(2, round(n / n_z))
-        r_1d  = np.linspace(0, Re, n_r)
-        z_1d  = np.linspace(0, H,  n_z)
+        r_1d  = np.linspace(0, Re,     n_r)
+        z_1d  = np.linspace(0, H_mesh, n_z)
         R, Z  = np.meshgrid(r_1d, z_1d)
         r_flat = R.ravel();  z_flat = Z.ravel()
         pts    = np.column_stack([r_flat, z_flat, np.zeros(len(r_flat))])

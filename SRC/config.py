@@ -165,7 +165,7 @@ class BCCfg(BaseModel):
 class NumericalCfg(BaseModel):
     num_steps:     Optional[int]   = Field(default=None, description="Number of time steps (uniform fallback)")
     theta_cn:      float           = Field(gt=0, le=1, description="Crank-Nicholson theta (0:Explicit ; 0.5: C-N ; 1: Implicit)", default=0.5)
-    end_time_tv:    float           = Field(gt=0, description="Dimensionless consolidation time T_v = c_v*t/(4H²); t_end[s] = 4H²/c_v * T_v", default=0.25)
+    end_time_tv:    float           = Field(gt=0, description="Dimensionless consolidation time T_v = c_v*t/H_dr² where H_dr=H/2; t_end[s] = H²/c_v * T_v", default=0.25)
     dt_min_s:      Optional[float] = Field(default=None, description="Minimum physical timestep [s]")
     dt_max_s:      Optional[float] = Field(default=None, description="Maximum physical timestep [s]")
     dt_factor:     float           = Field(default=1.5,  description="Geometric growth factor between timesteps")
@@ -183,9 +183,10 @@ class NumericalCfg(BaseModel):
         self._time_list    = [0.0]
 
     def setup_timesteps(self, config):
-        H   = config.mesh.H
-        c_v = config.materials.c_v
-        t_end = 4.0 * H * H / c_v * self.end_time_tv
+        H     = config.mesh.H
+        H_dr  = H / 2          # drainage path = half of full specimen height
+        c_v   = config.materials.c_v
+        t_end = H_dr * H_dr / c_v * self.end_time_tv
 
         if self.dt_min_s is not None and self.dt_max_s is not None:
             self._build_geometric_timesteps(config, t_end)
