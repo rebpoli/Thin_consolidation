@@ -1,0 +1,96 @@
+================================================================================
+DEMO 12: CONSTANT vs OSCILLATING LOAD - QUICKSTART
+================================================================================
+
+PURPOSE
+-------
+Validate theta-weighting scheme for stress boundary conditions.
+
+Case 1: Constant 5 MPa stress (baseline)
+Case 2: Oscillating 0-10 MPa load, 50% duty cycle, 10 cycles
+
+DIRECTORY STRUCTURE
+-------------------
+DEMO 12/
+  ├── config_constant.yaml          (constant stress case)
+  ├── config_oscillating.yaml       (oscillating load case)
+  ├── plot_comparison.py            (plot both cases)
+  ├── README.md                     (detailed description)
+  ├── VALIDATION_PROTOCOL.md        (analysis guide)
+  ├── runs/
+  │   ├── constant_5mpa/
+  │   │   ├── config.yaml           (symlink to config_constant.yaml)
+  │   │   └── outputs/              (results stored here)
+  │   └── oscillating_0_10mpa/
+  │       ├── config.yaml           (symlink to config_oscillating.yaml)
+  │       └── outputs/              (results stored here)
+  └── png/
+      └── comparison.png            (generated plot)
+
+RUNNING THE DEMO
+----------------
+
+Step 1: Run constant stress case
+  $ cd runs/constant_5mpa
+  $ python ../../SRC/run.py
+  $ cd ../..
+
+Step 2: Run oscillating load case
+  $ cd runs/oscillating_0_10mpa
+  $ python ../../SRC/run.py
+  $ cd ../..
+
+Step 3: Generate comparison plots
+  $ ./plot_comparison.py
+
+EXPECTED OUTPUT
+---------------
+✓ fem_timeseries.nc in each outputs/ directory
+✓ pressure_profile.nc for vertical line sampling
+✓ results.bp for full field visualization
+✓ comparison.png with side-by-side plots
+
+KEY METRICS TO CHECK
+--------------------
+
+1. Pressure dissipation rates
+   - Should be similar in both cases when averaged
+   - Oscillating case has periodic variations on top
+
+2. Oscillation amplitude (oscillating case)
+   - Should be consistent across all 10 cycles
+   - Should NOT decay (indicates numerical damping)
+   - Should NOT grow (indicates instability)
+
+3. Settlement pattern
+   - Constant case: monotonic increase
+   - Oscillating case: steps up with load-ON, levels off with load-OFF
+
+4. Time to consolidation
+   - Both cases should consolidate on similar timescale
+   - 50% pressure dissipation should occur at similar times
+
+TIME ESTIMATE
+-------------
+- Each run: 10-20 minutes (depending on timestep adaptation)
+- Plot generation: < 1 minute
+- Total: ~25-45 minutes for both cases
+
+TROUBLESHOOTING
+---------------
+
+Q: Runs are very slow?
+A: Check mesh size (N=100 is moderate). Very fine meshes will be slow.
+
+Q: Memory issues?
+A: Oscillating case has more timesteps than constant. Reduce end_time_tv
+   if running on limited memory.
+
+Q: No output files?
+A: Check that runs/ directories have config.yaml symlinks pointing to
+   config_constant.yaml and config_oscillating.yaml
+
+Q: plot_comparison.py fails?
+A: Ensure both simulations completed. Check outputs/fem_timeseries.nc exists.
+
+================================================================================

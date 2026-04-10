@@ -1,245 +1,221 @@
-from dolfinx import fem
-import ufl
+"""UFL weak form and boundary condition setup for axisymmetric Biot poroelasticity.
+
+Implements the mixed P2/P1 (displacement/pressure) formulation with
+Crank-Nicolson time integration.  All integrals carry the r·dΩ
+axisymmetric weight.
+
+Effective stress sign convention:  σ_total = σ_effective − α·p·I
+  (compression negative, tension positive — geomechanics convention)
+"""
+
 import numpy as np
-
+import ufl
+from dolfinx import fem
 from petsc4py import PETSc
-import config
 
+from config import CONFIG, SURFACES
+
+
+# ---------------------------------------------------------------------------
+# Formulation
+# ---------------------------------------------------------------------------
 
 class PoroelasticityFormulation:
-    #
-    #
+    """Assembles the weak form and manages boundary conditions.
+
+    Responsibilities:
+      - Define axisymmetric strain / volumetric strain / effective-stress operators.
+      - Build the bilinear form a(u,p; v,q) and linear form L at each timestep.
+      - Apply Dirichlet BCs (displacement, pressure) and Neumann tractions.
+      - Enforce optional rigid-body coupling via a penalty method.
+      - Project stress components from the solution field.
+    """
+
+    # Marker IDs assigned by CylinderMesh — must stay in sync
+    _MARKERS = {'bottom': 1, 'right': 2, 'top': 3, 'left': 4}
+
     def __init__(self, domain, function_space, facets):
-        self.domain = domain
-        self.W      = function_space
-        self.facets = facets
-        
-        cfg = config.get()
-        self.material_cfg = cfg.materials
-        self.numerical_cfg = cfg.numerical
-        self.bc_cfg       = cfg.boundary_conditions
-        
+        self.domain  = domain
+        self.W       = function_space
+        self.facets  = facets
+        self.bc_cfg  = CONFIG.boundary_conditions
+
         self._define_kinematics()
-        self._create_fem_constants()
-    
+        self._create_fem_constants(CONFIG)
+
     #
     #
     def _define_kinematics(self):
+        """Create axisymmetric kinematic operators as closures over the spatial coordinate.
+
+        eps(w)      — full 3×3 axisymmetric strain tensor (rr, tt, zz, rz components)
+        eps_v(w)    — volumetric strain = tr(eps)
+        sigma_eff(w) — linear elastic effective stress (Lamé)
+
+        The θθ component w[0]/r accounts for the hoop strain in axisymmetry.
+        """
         x = ufl.SpatialCoordinate(self.domain)
-        
+
         def eps(w):
-            e_rr = w[0].dx(0)
-            e_tt = w[0] / x[0]
-            e_zz = w[1].dx(1)
-            e_rz = 0.5 * (w[0].dx(1) + w[1].dx(0))
-            
             return ufl.sym(ufl.as_tensor([
-                [e_rr, 0,    e_rz],
-                [0,    e_tt, 0   ],
-                [e_rz, 0,    e_zz]
+                [w[0].dx(0),      0,    0.5 * (w[0].dx(1) + w[1].dx(0))],
+                [0,           w[0] / x[0],  0                           ],
+                [0.5 * (w[0].dx(1) + w[1].dx(0)),  0,   w[1].dx(1)     ],
             ]))
-        
+
         def eps_v(w):
             return w[0].dx(0) + w[0] / x[0] + w[1].dx(1)
-        
+
         def sigma_eff(w):
             return self.lmbda * ufl.tr(eps(w)) * ufl.Identity(3) + 2.0 * self.mu * eps(w)
-        
-        self.eps       = eps
-        self.eps_v     = eps_v
-        self.sigma_eff = sigma_eff
-        self.x         = x
-    
+
+        self.eps        = eps
+        self.eps_v      = eps_v
+        self.sigma_eff  = sigma_eff
+        self.x          = x
+
     #
     #
-    def _create_fem_constants(self):
-        self.alpha = fem.Constant(self.domain, self.material_cfg.alpha)
-        self.perm  = fem.Constant(self.domain, self.material_cfg.perm)
-        self.visc  = fem.Constant(self.domain, self.material_cfg.visc)
-        self.M     = fem.Constant(self.domain, self.material_cfg.M)
-        self.mu    = fem.Constant(self.domain, self.material_cfg.mu)
-        self.lmbda = fem.Constant(self.domain, self.material_cfg.lmbda)
-        self.theta = fem.Constant(self.domain, self.numerical_cfg.theta_cn) 
-        
+    def _create_fem_constants(self, cfg):
+        """Wrap scalar material parameters as PETSc/UFL constants for the weak form."""
+        m = cfg.materials
+        self.alpha          = fem.Constant(self.domain, m.alpha)
+        self.perm           = fem.Constant(self.domain, m.perm)
+        self.visc           = fem.Constant(self.domain, m.visc)
+        self.M              = fem.Constant(self.domain, m.M)
+        self.mu             = fem.Constant(self.domain, m.mu)
+        self.lmbda          = fem.Constant(self.domain, m.lmbda)
+        self.theta          = fem.Constant(self.domain, cfg.timestepper.theta_cn)
+        self._penalty_rigid = cfg.timestepper.penalty_rigid
         print(f"✓ Time integration: Crank-Nicolson (θ={self.theta.value})")
-    
+
     #
     #
-    def weak_form(self, dt, t, wh_old):
-        u, p = ufl.TrialFunctions(self.W)
-        v, q = ufl.TestFunctions(self.W)
-        
+    def weak_form(self, dt: float, t: float, wh_old):
+        """Return (a, L) — the bilinear and linear forms for one timestep.
+
+        Crank-Nicolson weighting θ is applied to the flow term:
+          θ·k/μ·∇p·∇q  (implicit)  +  (1−θ)·k/μ·∇p_old·∇q  (explicit)
+
+        All terms are multiplied by r for the axisymmetric volume element r·dΩ.
+        """
+        u, p         = ufl.TrialFunctions(self.W)
+        v, q         = ufl.TestFunctions(self.W)
         u_old, p_old = ufl.split(wh_old)
-        
-        dt_const = fem.Constant(self.domain, dt)
-        r = self.x[0]
+
+        dt_c  = fem.Constant(self.domain, dt)
+        r     = self.x[0]
         theta = self.theta
-        
+
         dx = ufl.Measure("dx", domain=self.domain)
         ds = ufl.Measure("ds", domain=self.domain, subdomain_data=self.facets)
 
-        # For rigid BC
-        bottom_marker = self._get_boundary_marker('bottom')
-
-        # BILINEAR FORM (LHS)
         a = (
-            # Mechanical equilibrium: quasi-static, NO theta-weighting
-            # (instantaneous equilibrium at current timestep)
-            +  ufl.inner(self.sigma_eff(u), self.eps(v)) * r * dx
-            -  self.alpha * p * self.eps_v(v) * r * dx
-
-            # Flow equation: time derivatives + theta-weighted diffusion
-            + self.alpha / dt_const * self.eps_v(u) * q * r * dx
+            ufl.inner(self.sigma_eff(u), self.eps(v)) * r * dx
+            - self.alpha * p * self.eps_v(v) * r * dx
+            + self.alpha / dt_c * self.eps_v(u) * q * r * dx
             + theta * (self.perm / self.visc) * ufl.inner(ufl.grad(p), ufl.grad(q)) * r * dx
-            + (1.0 / self.M) * p / dt_const * q * r * dx
+            + (1.0 / self.M) * p / dt_c * q * r * dx
         )
-        
-        # LINEAR FORM (RHS)
-        L = (
-            # Flow equation: time derivatives + (1-theta)-weighted diffusion
-            + self.alpha / dt_const * self.eps_v(u_old) * q * r * dx
-            - (1 - theta) * (self.perm / self.visc) * ufl.inner(ufl.grad(p_old), ufl.grad(q)) * r * dx
-            + (1.0 / self.M) * p_old / dt_const * q * r * dx
 
-            # Neumann boundary conditions
-            +  self._apply_neumann_bcs(v, q, r, dx, ds, t)
+        L = (
+            self.alpha / dt_c * self.eps_v(u_old) * q * r * dx
+            - (1 - theta) * (self.perm / self.visc) * ufl.inner(ufl.grad(p_old), ufl.grad(q)) * r * dx
+            + (1.0 / self.M) * p_old / dt_c * q * r * dx
+            + self._neumann_terms(v, q, r, dx, ds, t)
         )
-        
+
         return a, L
 
     #
-    # Collect all Neumann BC terms
-    def _apply_neumann_bcs(self, v, q, r, dx, ds, t: float = 0.0):
-
-        terms = [fem.Constant(self.domain, 0.0) * q * r * dx] ## Dummy to keep type consistency
+    #
+    def _neumann_terms(self, v, q, r, dx, ds, t: float):
+        """Accumulate traction boundary terms for all surfaces with non-zero loads."""
+        terms = [fem.Constant(self.domain, 0.0) * q * r * dx]
         n = ufl.FacetNormal(self.domain)
 
-        for surface in ['bottom', 'right', 'top', 'left']:
+        for surface in SURFACES:
             bc_spec = getattr(self.bc_cfg, surface)
-            marker = self._get_boundary_marker(surface)
-
-            sig_rr = bc_spec.sig_rr if bc_spec.sig_rr is not None else 0.0
-            if bc_spec.periodic_load is not None:
-                sig_zz = bc_spec.periodic_load.eval(t)
-            else:
-                sig_zz = bc_spec.sig_zz if bc_spec.sig_zz is not None else 0.0
-            if sig_rr == 0.0 and sig_zz == 0.0: continue
-
-            # Apply normal
-            traction_r = sig_rr * n[0]
-            traction_z = sig_zz * n[1]
-
-            traction = ufl.as_vector([traction_r, traction_z])
+            marker  = self._MARKERS[surface]
+            sig_rr  = bc_spec.sig_rr or 0.0
+            sig_zz  = (bc_spec.periodic_load.eval(t) if bc_spec.periodic_load is not None
+                       else (bc_spec.sig_zz or 0.0))
+            if sig_rr == 0.0 and sig_zz == 0.0:
+                continue
+            traction = ufl.as_vector([sig_rr * n[0], sig_zz * n[1]])
             terms.append(ufl.inner(traction, v) * r * ds(marker))
 
         return sum(terms)
-    
+
     #
     #
     def setup_boundary_conditions(self):
+        """Build and return the list of Dirichlet BCs from the config."""
         bcs = []
-        
-        for surface in ['bottom', 'right', 'top', 'left']:
+        for surface in SURFACES:
             bc_spec = getattr(self.bc_cfg, surface)
-            marker  = self._get_boundary_marker(surface)
-            
+            marker  = self._MARKERS[surface]
             if bc_spec.U_r is not None:
-                bc_ur = self._create_displacement_bc(0, float(bc_spec.U_r), marker)
-                bcs.append(bc_ur)
-            
+                bcs.append(self._dirichlet(self.W.sub(0).sub(0), float(bc_spec.U_r), marker))
             if bc_spec.U_z is not None:
-                bc_uz = self._create_displacement_bc(1, float(bc_spec.U_z), marker)
-                bcs.append(bc_uz)
-            
+                bcs.append(self._dirichlet(self.W.sub(0).sub(1), float(bc_spec.U_z), marker))
             if bc_spec.Pressure is not None:
-                bc_p = self._create_pressure_bc(float(bc_spec.Pressure), marker)
-                bcs.append(bc_p)
-        
+                bcs.append(self._dirichlet(self.W.sub(1), float(bc_spec.Pressure), marker))
         return bcs
 
     #
-    # Set rigid constraints using the penalty method
     #
-    def set_rigid_constraints( self, A ) :
-        for surface in ['bottom', 'right', 'top', 'left']:
-            ## Set rigid constraints
-            marker_id  = self._get_boundary_marker(surface)
-            bc_spec = getattr(self.bc_cfg, surface)
+    def set_rigid_constraints(self, A):
+        """Enforce rigid-body coupling on surfaces flagged U_r_rigid / U_z_rigid.
 
+        Adds penalty entries to the stiffness matrix so all DOFs on the surface
+        move together (equal displacement).  The penalty value is taken from
+        cfg.timestepper.penalty_rigid (default 1e10).
+        """
+        penalty = self._penalty_rigid
+        for surface in SURFACES:
+            bc_spec   = getattr(self.bc_cfg, surface)
+            marker_id = self._MARKERS[surface]
             components = []
-            if bc_spec.U_r_rigid : components.append(0)
-            if bc_spec.U_z_rigid : components.append(1)
-
-            for component in components :
-                facet_indices = self.facets.find(marker_id)
-                dofs = fem.locate_dofs_topological( self.W.sub(0).sub(component), self.domain.topology.dim - 1, facet_indices)
-                dofs = np.sort(dofs)
-                ref_dof = dofs[0]
-                penalty = self.numerical_cfg.penalty_rigid
-
-                indptr, indices, data = A.getValuesCSR()
+            if bc_spec.U_r_rigid:
+                components.append(0)
+            if bc_spec.U_z_rigid:
+                components.append(1)
+            for comp in components:
+                facet_idx = self.facets.find(marker_id)
+                dofs = np.sort(fem.locate_dofs_topological(
+                    self.W.sub(0).sub(comp), self.domain.topology.dim - 1, facet_idx))
+                ref = dofs[0]
                 A.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
                 A.setOption(PETSc.Mat.Option.KEEP_NONZERO_PATTERN, False)
-
-                ## Assign a penalty between the refernce DOF and every other DOF in the boundary
                 for dof in dofs[1:]:
-                    A.setValue(dof, dof, penalty, addv=PETSc.InsertMode.ADD_VALUES)
-                    A.setValue(ref_dof, ref_dof, penalty, addv=PETSc.InsertMode.ADD_VALUES)
-                    A.setValue(dof, ref_dof, -penalty, addv=PETSc.InsertMode.ADD_VALUES)
-                    A.setValue(ref_dof, dof, -penalty, addv=PETSc.InsertMode.ADD_VALUES)
-                
+                    A.setValue(dof,  dof,  penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                    A.setValue(ref,  ref,  penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                    A.setValue(dof,  ref, -penalty, addv=PETSc.InsertMode.ADD_VALUES)
+                    A.setValue(ref,  dof, -penalty, addv=PETSc.InsertMode.ADD_VALUES)
                 A.assemble()
 
-
-    
-    #
-    #
-    def _create_displacement_bc(self, component, value, marker):
-        facet_indices = self.facets.find(marker)
-        facet_dofs    = fem.locate_dofs_topological(
-            self.W.sub(0).sub(component), 
-            self.domain.topology.dim - 1, 
-            facet_indices
-        )
-        return fem.dirichletbc(value, facet_dofs, self.W.sub(0).sub(component))
-    
-    #
-    #
-    def _create_pressure_bc(self, value, marker):
-        facet_indices = self.facets.find(marker)
-        facet_dofs    = fem.locate_dofs_topological(
-            self.W.sub(1), 
-            self.domain.topology.dim - 1, 
-            facet_indices
-        )
-        return fem.dirichletbc(value, facet_dofs, self.W.sub(1))
-    
-    #
-    #
-    def _get_boundary_marker(self, surface):
-        marker_map = {"bottom": 1, "right": 2, "top": 3, "left": 4}
-        return marker_map[surface]
-    
     #
     #
     def compute_stress_components(self, wh):
+        """Return UFL expressions for the four stress components and von Mises stress.
+
+        Returns (sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises) as UFL scalars
+        suitable for L2 projection onto a DG0 or Lagrange function space.
+        """
         u, p = ufl.split(wh)
-        
-        # Effective stress: σ' = λ*tr(ε)*I + 2μ*ε
-        sigma_eff = self.sigma_eff(u)
-        
-        # Total stress: σ = σ' - α*p*I
+        sigma_eff   = self.sigma_eff(u)
         sigma_total = sigma_eff - self.alpha * p * ufl.Identity(3)
-        
-        # Extract components
-        sigma_rr = sigma_total[0, 0]
-        sigma_tt = sigma_total[1, 1]   # hoop stress
-        sigma_zz = sigma_total[2, 2]
-        sigma_rz = sigma_total[0, 2]
+        sigma_mean  = ufl.tr(sigma_total) / 3.0
+        s           = sigma_total - sigma_mean * ufl.Identity(3)
+        von_mises   = ufl.sqrt((3.0 / 2.0) * ufl.inner(s, s))
+        return (sigma_total[0, 0], sigma_total[1, 1],
+                sigma_total[2, 2], sigma_total[0, 2], von_mises)
 
-        # von Mises: √(3/2 * s:s) where s is deviatoric stress
-        sigma_mean = ufl.tr(sigma_total) / 3.0
-        s = sigma_total - sigma_mean * ufl.Identity(3)
-        von_mises = ufl.sqrt((3.0/2.0) * ufl.inner(s, s))
-
-        return sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises
+    #
+    #
+    def _dirichlet(self, subspace, value, marker):
+        """Create a Dirichlet BC on a named surface for the given subspace."""
+        dofs = fem.locate_dofs_topological(
+            subspace, self.domain.topology.dim - 1, self.facets.find(marker))
+        return fem.dirichletbc(value, dofs, subspace)

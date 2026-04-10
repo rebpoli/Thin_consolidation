@@ -1,285 +1,174 @@
+"""Structured quadrilateral mesh generation for the axisymmetric cylinder domain.
+
+Wraps gmsh to produce an orthogonal quad mesh on the r-z half-domain
+[0, Re] × [0, H/2].  Elements are graded geometrically so the finest
+resolution is concentrated near the lateral boundary (r=Re) and the
+loaded top face (z=H/2), where stress and pressure gradients are largest.
+
+Boundary physical groups:
+    bottom = 1  (z = 0,   symmetry plane)
+    right  = 2  (r = Re,  lateral boundary)
+    top    = 3  (z = H/2, loaded face)
+    left   = 4  (r = 0,   axis of symmetry)
+"""
+
+import numpy as np
 import gmsh
 from mpi4py import MPI
 from dolfinx.io import gmsh as gmshio
 
-import config
+from config import CONFIG
 
+
+# ---------------------------------------------------------------------------
+# Mesh
+# ---------------------------------------------------------------------------
 
 class CylinderMesh:
+    """Axisymmetric (r, z) cylinder mesh using structured quadrilateral elements.
+
+    Generates a graded orthogonal quad mesh via gmsh.  Refinement is applied
+    near the lateral boundary (r=Re) and near the loaded face (z=H_mesh),
+    where stress gradients are sharpest.
+
+    Boundary tags: bottom=1, right=2, top=3, left=4.
+    The mesh spans z ∈ [0, H/2] — only the half-specimen (symmetry at z=0).
+    """
+
     def __init__(self, comm=MPI.COMM_WORLD):
-        cfg = config.get()
-        
-        self.mesh_cfg = cfg.mesh
+        self.mesh_cfg = CONFIG.mesh
         self.comm     = comm
-        self.domain   = None
-        self.facets   = None
-
-        self.generate()
-        
-    def generate(self):
         self.domain, self.facets = self._create_gmsh_mesh()
-        return self.domain, self.facets
-    
-#     # Homogeneous triangles
-#     def _create_gmsh_mesh(self):
-#         Re    = self.mesh_cfg.Re
-#         H     = self.mesh_cfg.H
-#         N     = self.mesh_cfg.N
-#         hsize = H / N
-#         
-#         gmsh.initialize()
-#         gmsh.option.setNumber("General.Terminal", 0)
-#         
-#         gdim       = 2
-#         model_rank = 0
-#         
-#         gmsh.model.add("Cylinder")
-#         geom = gmsh.model.geo
-#         
-#         p1 = geom.add_point(0,  0, 0)
-#         p2 = geom.add_point(Re, 0, 0)
-#         p3 = geom.add_point(Re, H, 0)
-#         p4 = geom.add_point(0,  H, 0)
-#         
-#         bottom = geom.add_line(p1, p2)
-#         right  = geom.add_line(p2, p3)
-#         top    = geom.add_line(p3, p4)
-#         left   = geom.add_line(p4, p1)
-#         
-#         boundary = geom.add_curve_loop([bottom, right, top, left])
-#         surf     = geom.add_plane_surface([boundary])
-#         
-#         geom.synchronize()
-#         
-#         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", hsize)
-#         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", hsize)
-#         
-#         gmsh.model.addPhysicalGroup(gdim, [surf], 1)
-#         gmsh.model.addPhysicalGroup(gdim - 1, [bottom], 1, name="bottom")
-#         gmsh.model.addPhysicalGroup(gdim - 1, [right],  2, name="right")
-#         gmsh.model.addPhysicalGroup(gdim - 1, [top],    3, name="top")
-#         gmsh.model.addPhysicalGroup(gdim - 1, [left],   4, name="left")
-#         
-#         gmsh.model.mesh.generate(gdim)
-#         
-#         mesh_data = gmshio.model_to_mesh(gmsh.model, self.comm, model_rank, gdim=gdim)
-#         domain    = mesh_data.mesh
-#         facets    = mesh_data.facet_tags
-#         
-#         gmsh.finalize()
-#         
-#         if self.comm.rank == 0:
-#             num_cells = domain.topology.index_map(gdim).size_global
-#             print(f"✓ Mesh created: {num_cells} cells")
-#         
-#         return domain, facets
 
+    #
+    #
     def _create_gmsh_mesh(self):
-        """Create orthogonal quadrilateral mesh with geometric grading.
+        """Build orthogonal quad mesh with geometric grading.
 
-        Grading rules (applied independently to r and z directions):
-          h_min  = L / (N * 10)                     finest element
-          n_ref  = N // 2   elements, geometric,    covering L/4  (refined zone)
-          n_crs  = N - n_ref elements, uniform,     covering 3L/4 (coarse zone)
-          r      = geometric ratio, bisected so sum of refined zone = L/4 exactly
-          h_crs  = (3L/4) / n_crs                   uniform coarse size
-
-        Refinement direction:
-          r (x): fine near r=Re (right/lateral boundary) — from_end=True
-          z (y): fine near z=0  (bottom symmetry plane)  — from_end=False
+        Grading strategy (applied independently in r and z):
+          - Refined zone: N//2 elements covering L/6, with geometric spacing
+            starting at h_min = L/(N·10) and growing by ratio r each step.
+          - Coarse zone: remaining N//2 elements covering 5L/6 uniformly.
+          - r is found by bisection so the refined zone sums exactly to L/6.
+          - reverse=True flips the array so refinement is at the far end
+            (r=Re or z=H_mesh) rather than the origin.
         """
-        import numpy as np
-
-        Re = self.mesh_cfg.Re
-        H  = self.mesh_cfg.H
-        N  = self.mesh_cfg.N
+        cfg    = self.mesh_cfg
+        Re     = cfg.Re
+        H_mesh = cfg.H / 2   # mesh spans half the specimen height
+        N_r    = cfg.Nr if cfg.Nr is not None else cfg.N
+        N_z    = cfg.Nz if cfg.Nz is not None else cfg.N
 
         def _geometric_ratio(h_min, n_ref, L_ref, tol=1e-12):
-            """Bisect for r: h_min*(r^n_ref - 1)/(r-1) = L_ref."""
+            """Find geometric ratio r so that h_min*(r^n_ref - 1)/(r-1) = L_ref."""
             lo, hi = 1.0 + 1e-10, 1e6
             for _ in range(200):
                 mid = (lo + hi) / 2.0
-                s   = h_min * (mid**n_ref - 1.0) / (mid - 1.0)
-                if s < L_ref:
-                    lo = mid
-                else:
-                    hi = mid
+                try:
+                    s = h_min * (mid**n_ref - 1.0) / (mid - 1.0)
+                except OverflowError:
+                    s = float('inf')
+                lo, hi = (mid, hi) if s < L_ref else (lo, mid)
                 if hi - lo < tol:
                     break
             return (lo + hi) / 2.0
 
-        def _make_coords(length, N, from_end=False):
-            """Build node coordinates for one direction."""
-            n_ref  = N // 2
-            n_crs  = N - n_ref
-            h_min  = length / (N * 10)
-            L_ref  = length / 6.0
-            L_crs  = length - L_ref
-            h_crs  = L_crs / n_crs
+        def _make_coords(length, N, graded=True, reverse=False):
+            """Build 1-D coordinate array of N+1 nodes over [0, length].
 
-            r = _geometric_ratio(h_min, n_ref, L_ref)
+            If graded=True, applies geometric refinement in the first L/6 of
+            the interval.  If reverse=True, the fine zone is at the far end.
+            If graded=False, returns uniform spacing regardless of reverse.
+            """
+            if not graded:
+                return np.linspace(0.0, length, N + 1)
+
+            n_ref = N // 2
+            n_crs = N - n_ref
+            h_min = length / (N * 10)
+            L_ref = length / 6.0
+            h_crs = (length - L_ref) / n_crs
+            r     = _geometric_ratio(h_min, n_ref, L_ref)
 
             coords = [0.0]
             h = h_min
-            for i in range(n_ref):
+            for _ in range(n_ref):
                 coords.append(coords[-1] + h)
                 h *= r
-            # Snap end of refined zone exactly to L/4
-            coords[n_ref] = L_ref
-
+            coords[n_ref] = L_ref          # snap refined zone end exactly
             for _ in range(n_crs):
                 coords.append(coords[-1] + h_crs)
-            # Snap final point exactly to length
-            coords[-1] = length
+            coords[-1] = length            # snap final point exactly
 
             arr = np.array(coords)
-            if from_end:
-                arr = length - arr[::-1]   # mirror: fine at far end
-            return arr
+            return length - arr[::-1] if reverse else arr
 
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
-
-        gdim       = 2
-        model_rank = 0
-
-        gmsh.model.add("OrthogonalQuadMesh")
-
-        H_mesh = H / 2   # model only the top half; H is the full specimen height
-
-        x_coords = _make_coords(Re,     N, from_end=True)    # fine near r=Re
-        y_coords = _make_coords(H_mesh, N, from_end=True)   # fine near z=H_mesh (top/loaded face)
-
-        # ========================================================================
-        # Create structured grid of points
-        # ========================================================================
-
-
+        gmsh.model.add("CylinderMesh")
         geom = gmsh.model.geo
-        points = {}
 
-        # Calculate actual number of cells from coordinate arrays
+        # r: graded near r=Re by default; z: graded near z=0 or z=H_mesh per config
+        x_coords = _make_coords(Re,     N_r, graded=cfg.grade_r,        reverse=True)
+        y_coords = _make_coords(H_mesh, N_z, graded=True,               reverse=not cfg.grade_z_bottom)
+
         n_x = len(x_coords) - 1
         n_y = len(y_coords) - 1
 
-        for j in range(len(y_coords)):
-            for i in range(len(x_coords)):
-                tag = j * (n_x + 1) + i + 1
-                points[(i, j)] = geom.add_point(x_coords[i], y_coords[j], 0, tag=tag)
+        # Points — indexed by (i, j) on the structured grid
+        points = {
+            (i, j): geom.add_point(x_coords[i], y_coords[j], 0,
+                                   tag=j * (n_x + 1) + i + 1)
+            for j in range(n_y + 1)
+            for i in range(n_x + 1)
+        }
 
-        # ========================================================================
-        # Create horizontal lines
-        # ========================================================================
-
-        h_lines = {}
-        line_tag = 1
-
+        # Lines — horizontal (h_lines) and vertical (v_lines), keyed by lower-left corner
+        tag = 1
+        h_lines, v_lines = {}, {}
         for j in range(n_y + 1):
             for i in range(n_x):
-                h_lines[(i, j)] = geom.add_line(points[(i, j)], points[(i+1, j)], tag=line_tag)
-                line_tag += 1
-
-        # ========================================================================
-        # Create vertical lines
-        # ========================================================================
-
-        v_lines = {}
-
+                h_lines[(i, j)] = geom.add_line(points[(i, j)], points[(i+1, j)], tag=tag); tag += 1
         for i in range(n_x + 1):
             for j in range(n_y):
-                v_lines[(i, j)] = geom.add_line(points[(i, j)], points[(i, j+1)], tag=line_tag)
-                line_tag += 1
+                v_lines[(i, j)] = geom.add_line(points[(i, j)], points[(i, j+1)], tag=tag); tag += 1
 
-        # ========================================================================
-        # Create quadrilateral surfaces
-        # ========================================================================
-
+        # Surfaces — one quad per (i,j) cell; loop order (j, i) matches gmsh's row-major expectation
         surfaces = []
-        surf_tag = 1
-
-        for j in range(n_y):
-            for i in range(n_x):
-                bottom = h_lines[(i, j)]
-                right = v_lines[(i+1, j)]
-                top = h_lines[(i, j+1)]
-                left = v_lines[(i, j)]
-
-                loop = geom.add_curve_loop([bottom, right, -top, -left], tag=surf_tag)
-                surf = geom.add_plane_surface([loop], tag=surf_tag)
-                surfaces.append(surf)
-                surf_tag += 1
+        for surf_tag, (j, i) in enumerate(
+                ((j, i) for j in range(n_y) for i in range(n_x)), start=1):
+            loop = geom.add_curve_loop(
+                [h_lines[(i, j)], v_lines[(i+1, j)], -h_lines[(i, j+1)], -v_lines[(i, j)]],
+                tag=surf_tag)
+            surfaces.append(geom.add_plane_surface([loop], tag=surf_tag))
 
         geom.synchronize()
 
-        # ========================================================================
-        # Set transfinite mesh (1 quad per surface)
-        # ========================================================================
-
+        # Force transfinite (structured) quads on every surface and line
         for surf in surfaces:
             gmsh.model.mesh.setTransfiniteSurface(surf)
-            gmsh.model.mesh.setRecombine(gdim, surf)
-
-        # Set all curves as transfinite with 2 points
+            gmsh.model.mesh.setRecombine(2, surf)
         for line in list(h_lines.values()) + list(v_lines.values()):
             gmsh.model.mesh.setTransfiniteCurve(line, 2)
-
-        # Global recombination option
         gmsh.option.setNumber("Mesh.RecombineAll", 1)
 
-        # ========================================================================
-        # Physical groups
-        # ========================================================================
+        # Physical groups — marker IDs must match MARKERS in formulation.py
+        gmsh.model.addPhysicalGroup(2, surfaces, 1)
+        gmsh.model.addPhysicalGroup(1, [h_lines[(i, 0)]    for i in range(n_x)], 1, name="bottom")
+        gmsh.model.addPhysicalGroup(1, [v_lines[(n_x, j)]  for j in range(n_y)], 2, name="right")
+        gmsh.model.addPhysicalGroup(1, [h_lines[(i, n_y)]  for i in range(n_x)], 3, name="top")
+        gmsh.model.addPhysicalGroup(1, [v_lines[(0, j)]    for j in range(n_y)], 4, name="left")
 
-        # Collect boundary lines
-        bottom_lines = [h_lines[(i, 0)] for i in range(n_x)]
-        right_lines = [v_lines[(n_x, j)] for j in range(n_y)]
-        top_lines = [h_lines[(i, n_y)] for i in range(n_x)]
-        left_lines = [v_lines[(0, j)] for j in range(n_y)]
-
-
-        # Add physical groups
-        gmsh.model.addPhysicalGroup(gdim, surfaces, 1)
-        gmsh.model.addPhysicalGroup(gdim - 1, bottom_lines, 1, name="bottom")
-        gmsh.model.addPhysicalGroup(gdim - 1, right_lines, 2, name="right")
-        gmsh.model.addPhysicalGroup(gdim - 1, top_lines, 3, name="top")
-        gmsh.model.addPhysicalGroup(gdim - 1, left_lines, 4, name="left")
-
-        # ========================================================================
-        # Generate mesh
-        # ========================================================================
-
-        gmsh.model.mesh.generate(gdim)
-
-        # Convert to dolfinx
-        mesh_data = gmshio.model_to_mesh(gmsh.model, self.comm, model_rank, gdim=gdim)
-        domain = mesh_data.mesh
-        facets = mesh_data.facet_tags
-
-#         gmsh.fltk.run()
+        gmsh.model.mesh.generate(2)
+        mesh_data = gmshio.model_to_mesh(gmsh.model, self.comm, 0, gdim=2)
+        domain    = mesh_data.mesh
+        facets    = mesh_data.facet_tags
         gmsh.finalize()
 
-        # ========================================================================
-        # Verification
-        # ========================================================================
-
         if self.comm.rank == 0:
-            num_cells = domain.topology.index_map(gdim).size_global
-            cell_type = domain.topology.cell_type
-
-            print(f"✓ Mesh created: {num_cells} cells")
-            print(f"  Cell type: {cell_type}")
-            h_min_x = np.diff(x_coords).min()
-            h_max_x = np.diff(x_coords).max()
-            h_min_y = np.diff(y_coords).min()
-            h_max_y = np.diff(y_coords).max()
-            print(f"  Grid: {n_x} × {n_y}  (N={N})")
-            print(f"  R spacing: {h_min_x:.3e} … {h_max_x:.3e} m  (ratio {h_max_x/h_min_x:.1f}×)")
-            print(f"  Z spacing: {h_min_y:.3e} … {h_max_y:.3e} m  (ratio {h_max_y/h_min_y:.1f}×)")
-
-            from dolfinx.mesh import CellType
-            if cell_type == CellType.quadrilateral:
-                print(f"  ✓ Quadrilateral mesh")
-            else:
-                print(f"  ⚠ Warning: {cell_type}")
+            nc = domain.topology.index_map(2).size_global
+            print(f"✓ Mesh: {nc} cells  ({n_x}×{n_y})  "
+                  f"Δr=[{np.diff(x_coords).min():.2e}, {np.diff(x_coords).max():.2e}] m  "
+                  f"Δz=[{np.diff(y_coords).min():.2e}, {np.diff(y_coords).max():.2e}] m")
 
         return domain, facets

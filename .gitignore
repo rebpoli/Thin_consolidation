@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Simulation outputs (generated at runtime)
+outputs/
+runs/
+log/
+
+# Generated plots
+png/
+*.png
+*.mp4
+*.avi
+*.gif
+
+# Generated mesh files
+*.msh
+*.geo_unrolled
+*.vtk
+*.vtu
+*.xdmf
+*.h5
+*.bp
+
+# NetCDF
+*.nc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor
+.DS_Store
+*.swp
+*~

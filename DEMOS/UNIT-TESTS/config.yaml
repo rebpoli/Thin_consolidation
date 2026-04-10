@@ -1,0 +1,39 @@
+general:
+  description: "Unit test"
+  tags: ""
+  run_dir: ""
+  run_id: ""
+
+mesh:
+  Re: 1.0
+  H: 0.1
+  N: 10
+
+materials:
+  E: 1.44e10
+  nu: 0.2
+  alpha: 0.78
+  perm: 1.9e-13
+  visc: 1.0e-3
+  M: 1.35e10
+
+boundary_conditions:
+  top:
+    sig_zz: -1.0e5
+
+  bottom:
+    U_z: 0.0
+    Pressure: 0.0
+
+  right:
+    U_r: 0.0
+
+  left:
+    U_r: 0.0
+
+numerical:
+  num_steps: 100
+
+output:
+  results: "outputs/results.bp"
+  timeseries: "outputs/fem_timeseries.nc"

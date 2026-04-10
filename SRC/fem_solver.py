@@ -1,71 +1,93 @@
+"""Poroelastic consolidation FEM solver — time integration and diagnostics.
+
+Orchestrates the full simulation:
+  1. Builds P2/P1 mixed function spaces.
+  2. Delegates weak-form assembly to PoroelasticityFormulation.
+  3. Solves the coupled system with PETSc GMRES + MUMPS at each timestep.
+  4. Projects stresses to Lagrange-1 functions for VTX output.
+  5. Tracks scalar diagnostics (pressure, displacement, volume) and compares
+     against the Terzaghi 1D analytical solution.
+  6. Streams results to VTX (ParaView), NetCDF timeseries, pressure profile,
+     and stress-invariant files via the output_writers module.
+"""
+
 import os
 import numpy as np
+import pandas as pd
 
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from dolfinx import fem, io
+from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
 from basix.ufl import element, mixed_element
-from ufl import *
 import ufl
-import netCDF4 as nc4
-from dolfinx.io import VTXWriter
 
-        
-import config
+from config import CONFIG, SURFACES
 from formulation import PoroelasticityFormulation
 from analytical import Analytical1DConsolidation
-from export_pvd import PVDExporter
 from vertical_line_sampler import VerticalLineSampler
+from output_writers import OutputManager
 
+
+# ---------------------------------------------------------------------------
+# Solver
+# ---------------------------------------------------------------------------
 
 class PoroelasticitySolver:
-    #
-    #
+    """Time-integration driver for the coupled poroelastic system.
+
+    Attributes exposed after solve():
+        history  — dict of scalar time-series arrays (pressures, displacements,
+                   volumes, errors).  Keys match _HISTORY_KEYS.
+    """
+
+    # Keys shared between _initialize_history, _collect_history, _record_timestep
+    _HISTORY_KEYS = [
+        'times',
+        'sig_zz_applied',
+        'pressure_at_base', 'pressure_mean', 'pressure_p10', 'pressure_p90',
+        'uz_at_bottom', 'uz_at_top',
+        'volume_drained',
+        'analytical_pressure', 'analytical_uz', 'analytical_volume',
+        'pressure_error_percent', 'uz_error_percent', 'volume_error_percent',
+    ]
+
     def __init__(self, mesh):
         self.mesh   = mesh
         self.domain = mesh.domain
         self.facets = mesh.facets
         self.comm   = mesh.comm
         self.gdim   = self.domain.geometry.dim
-        
-        cfg = config.get()
-        self.cfg = cfg
-        
+
         self.analytical = Analytical1DConsolidation()
-        
-        # Function spaces setup
-        # P2 for displacement ; P1 for pressure
+
+        # Mixed function space: P2 for displacement, P1 for pressure
         cell_name = self.domain.topology.cell_name()
-        P2 = element("Lagrange", cell_name, 2, shape=(self.gdim,))
-        P1 = element("Lagrange", cell_name, 1)
+        P2        = element("Lagrange", cell_name, 2, shape=(self.gdim,))
+        P1        = element("Lagrange", cell_name, 1)
+        self.W    = fem.functionspace(self.domain, mixed_element([P2, P1]))
 
-        mixed_elem = mixed_element([P2, P1])
-        self.W = fem.functionspace(self.domain, mixed_elem)
-
-        
-        # Formulation
         self.formulation = PoroelasticityFormulation(self.domain, self.W, self.facets)
-        
-        # History tracking
+
         self.wh     = fem.Function(self.W, name="Solution")
         self.wh_old = fem.Function(self.W, name="Previous")
-        self.bcs = self.formulation.setup_boundary_conditions()
+        self.bcs    = self.formulation.setup_boundary_conditions()
 
-        self._setup_vtk_output()
-        self._setup_vertical_line_sampler()
-        self._setup_invariant_sampler()
+        v_sampler    = VerticalLineSampler(self.W, self.domain)
+        self._output = OutputManager(self.comm, self.domain, v_sampler)
 
-        self.history = None
+        self._setup_output_functions()
 
+        self._prev_loads = {}   # tracks load values for change-detection in console output
+        self.history     = None
 
-    
-    
-    #
-    #
-    def _setup_vtk_output(self):
-        # All output functions use Lagrange degree 1 so VTXWriter accepts them together.
+    # ------------------------------------------------------------------
+    # Output setup
+    # ------------------------------------------------------------------
+
+    def _setup_output_functions(self):
+        """Create Lagrange-1 output functions and open the VTX writer."""
         cell_name = self.domain.topology.cell_name()
         V_out = fem.functionspace(self.domain, element("Lagrange", cell_name, 1, shape=(self.gdim,)))
         Q_out = fem.functionspace(self.domain, element("Lagrange", cell_name, 1))
@@ -78,95 +100,75 @@ class PoroelasticitySolver:
         self.sigma_rz_out  = fem.Function(Q_out, name="sigma_rz")
         self.von_mises_out = fem.Function(Q_out, name="von_Mises")
 
-        output_path = self.cfg.output.results
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        self.vtx_writer = io.VTXWriter(
+        self._output.configure_vtx(
             self.domain.comm,
-            output_path,
             [self.u_out, self.p_out,
              self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
              self.sigma_rz_out, self.von_mises_out],
-            engine="BP4",
+            self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
+            self.sigma_rz_out, self.p_out, self.u_out,
         )
 
-        if self.comm.rank == 0:
-            print(f"✓ Results output configured: {output_path}")
-    
-    def _setup_vertical_line_sampler(self):
-        """Initialize vertical line pressure sampler for centerline (r=0)."""
-        num_points = self.cfg.output.n_profile_points
-        self.v_sampler = VerticalLineSampler(self.W, self.domain, self.cfg, num_points=num_points)
-        
-        if self.comm.rank == 0:
-            print(f"✓ Vertical line sampler configured: {num_points} points along centerline")
-    
-    #
-    #
-    def solve(self):
-        if self.comm.rank == 0:
-            print("\n" + "="*70)
-            print("STARTING TIME INTEGRATION")
-            print("="*70)
-        
-        history = self._initialize_history()
-        prev_loads = {}
-        self._open_timeseries_nc()
-        self._open_pressure_profile_nc()
-        self._open_invariants_nc()
+    # ------------------------------------------------------------------
+    # Main solve loop
+    # ------------------------------------------------------------------
 
-        #
-        # Timestep loop
-        #
-        for i_ts, dt, time in self.cfg.numerical:
-            prev_loads = self._print_load_changes(time, prev_loads)
+    def solve(self):
+        """Run the full time integration and write all output files."""
+        if self.comm.rank == 0:
+            print("\n" + "=" * 70)
+            print("STARTING TIME INTEGRATION")
+            print("=" * 70)
+
+        history = self._initialize_history()
+
+        self._output.open()
+
+        for i_ts, dt, time in CONFIG.timestepper:
+            self._print_load_changes(time)
             self._solve_timestep(dt, time)
             self._compute_and_project_stresses()
-            self._collect_history(history, i_ts, time)
-            self._write_timestep(time)
-            self._append_timeseries_record(history, time)
-            self._append_pressure_profile_record(time)
-            self._append_invariants_record(time)
+            self._collect_history(history, time)
+            self._record_timestep(time, history)
             self._print_progress(i_ts, time, dt, history)
             self.wh_old.x.array[:] = self.wh.x.array[:]
 
         self.history = history
 
         if self.comm.rank == 0:
-            print("="*70)
+            print("=" * 70)
             print("TIME INTEGRATION COMPLETED")
-            print("="*70)
+            print("=" * 70)
 
-        self.vtx_writer.close()
-        self._close_timeseries_nc()
-        self._close_pressure_profile_nc()
-        self._close_invariants_nc()
-
+        self._output.close()
         self._save_run_summary()
 
-    #
-    #
-    def _solve_timestep(self, dt, t: float = 0.0):
-        a, L = self.formulation.weak_form(dt, t, self.wh_old)
-        
-        # Assemble the system
-        A = fem.petsc.assemble_matrix(fem.form(a), bcs=self.bcs)
+    # ------------------------------------------------------------------
+    # Linear system assembly and solve
+    # ------------------------------------------------------------------
 
+    def _solve_timestep(self, dt, t: float = 0.0):
+        """Assemble and solve the coupled poroelastic system for one timestep.
+
+        Uses PETSc GMRES preconditioned with LU (MUMPS) via the
+        'main_ksp_' options prefix.  Rigid constraints are applied as
+        penalty entries on the assembled matrix before the solve.
+        """
+        a, L = self.formulation.weak_form(dt, t, self.wh_old)
+
+        A = fem.petsc.assemble_matrix(fem.form(a), bcs=self.bcs)
         b = fem.petsc.assemble_vector(fem.form(L))
         fem.petsc.apply_lifting(b, [fem.form(a)], [self.bcs])
         b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
         fem.petsc.set_bc(b, self.bcs)
-
         A.assemble()
 
-        self.formulation.set_rigid_constraints( A )
-
+        self.formulation.set_rigid_constraints(A)
         A.assemble()
 
-        # Create solver: GMRES with LU (MUMPS) preconditioner
         solver = PETSc.KSP().create(self.mesh.comm)
         solver.setOptionsPrefix("main_ksp_")
         solver.setOperators(A)
-
         opts   = PETSc.Options()
         prefix = solver.getOptionsPrefix()
         opts[f"{prefix}ksp_type"]                  = "gmres"
@@ -177,520 +179,272 @@ class PoroelasticitySolver:
         opts[f"{prefix}ksp_max_it"]                = 1000
         solver.setFromOptions()
         solver.solve(b, self.wh.x.petsc_vec)
-
-        # Sync all processors
         self.wh.x.scatter_forward()
 
-    #
-    #
-    def _compute_and_project_stresses(self):
-        sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises = self.formulation.compute_stress_components(self.wh)
-        self._project_scalar(sigma_rr,  self.sigma_rr_out)
-        self._project_scalar(sigma_tt,  self.sigma_tt_out)
-        self._project_scalar(sigma_zz,  self.sigma_zz_out)
-        self._project_scalar(sigma_rz,  self.sigma_rz_out)
-        self._project_scalar(von_mises, self.von_mises_out)
-        for f in [self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
-                  self.sigma_rz_out, self.von_mises_out]:
-            f.x.scatter_forward()
+    # ------------------------------------------------------------------
+    # Stress projection
+    # ------------------------------------------------------------------
 
+    def _compute_and_project_stresses(self):
+        """Project UFL stress expressions to Lagrange-1 and interpolate u, p."""
+        sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises = \
+            self.formulation.compute_stress_components(self.wh)
+        for expr, func in [
+            (sigma_rr,  self.sigma_rr_out),
+            (sigma_tt,  self.sigma_tt_out),
+            (sigma_zz,  self.sigma_zz_out),
+            (sigma_rz,  self.sigma_rz_out),
+            (von_mises, self.von_mises_out),
+        ]:
+            self._project_scalar(expr, func)
+            func.x.scatter_forward()
+
+        uh, ph = self.wh.split()
+        self.u_out.interpolate(uh)
+        self.p_out.interpolate(ph)
+
+    #
+    #
     def _project_scalar(self, expr, target_func):
-        """Project expression to DG0 function using L2 projection with axisymmetric weighting"""
-        V = target_func.function_space
-        u = ufl.TrialFunction(V)
-        v = ufl.TestFunction(V)
-        
-        # Axisymmetric: need r * dx weighting
-        x = ufl.SpatialCoordinate(self.domain)
-        r = x[0]
-        
+        """L2-project a UFL scalar expression onto target_func's function space.
+
+        Uses r·dΩ axisymmetric weighting and a direct LU solve (preonly/lu).
+        """
+        V  = target_func.function_space
+        u  = ufl.TrialFunction(V)
+        v  = ufl.TestFunction(V)
+        r  = ufl.SpatialCoordinate(self.domain)[0]
         dx = ufl.Measure("dx", domain=self.domain)
-        a = ufl.inner(u, v) * r * dx
-        L = ufl.inner(expr, v) * r * dx
-        
-        # Solve projection
-        problem = LinearProblem(a, L, u=target_func, 
-                               petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
-                               petsc_options_prefix="consolid"
-                                )
+        problem = LinearProblem(
+            ufl.inner(u, v) * r * dx,
+            ufl.inner(expr, v) * r * dx,
+            u=target_func,
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            petsc_options_prefix="consolid",
+        )
         problem.solve()
-    
+
+    # ------------------------------------------------------------------
+    # History / diagnostics
+    # ------------------------------------------------------------------
+
     #
     #
     def _initialize_history(self):
-        return {
-            'times':                  [],
-            'sig_zz_applied':         [],
-            'pressure_at_top':        [],
-            'pressure_mean':          [],
-            'pressure_p10':           [],
-            'pressure_p90':           [],
-            'uz_at_bottom':           [],
-            'uz_at_top':              [],
-            'volume_drained':         [],
-            'analytical_pressure':    [],
-            'analytical_uz':          [],
-            'analytical_volume':      [],
-            'pressure_error_percent': [],
-            'uz_error_percent':       [],
-            'volume_error_percent':   [],
-        }
-    
-    #
-    #
-    def _collect_history(self, history, i_ts, time):
-        fem_pressure  = self._compute_pressure_at_top()
-        fem_uz        = self._compute_uz_at_bottom()
-        fem_uz_top    = self._compute_uz_at_top()
-        fem_volume    = self._compute_volume_drained()
-        p_mean, p_p10, p_p90 = self._compute_pressure_statistics()
-        sig_zz_applied = self._get_applied_sig_zz(time)
-        
-        analytical_pressure = self.analytical.pressure_at_top(time)
-        analytical_uz       = self.analytical.uz_at_bottom(time)
-        analytical_volume   = self.analytical.volume_drained(time)
-        
-        _p_ref  = abs(analytical_pressure)
-        _u_ref  = abs(analytical_uz)
-        _v_ref  = abs(analytical_volume)
-        _tol    = 1e-30   # treat reference as zero below this magnitude
-        pressure_error = 100 * abs(fem_pressure - analytical_pressure) / _p_ref if _p_ref > _tol else float('nan')
-        uz_error       = 100 * abs(fem_uz       - analytical_uz)       / _u_ref if _u_ref > _tol else float('nan')
-        volume_error   = 100 * abs(fem_volume   - analytical_volume)   / _v_ref if _v_ref > _tol else float('nan')
+        return {k: [] for k in self._HISTORY_KEYS}
 
-#         print(f"FEM Pressure: {fem_pressure:.6e}, Analytical Pressure: {analytical_pressure:.6e}, Error: {pressure_error:.2f}%")
+    def _drainage_z(self) -> float:
+        """Return the z-coordinate of the drainage face (where Pressure BC = 0).
+
+        Checks top (z=H/2) then bottom (z=0).  Returns None if no drainage face found.
+        """
+        H_half = CONFIG.mesh.H / 2
+        bc = CONFIG.boundary_conditions
+        if bc.top.Pressure    is not None:
+            return H_half
+        if bc.bottom.Pressure is not None:
+            return 0.0
+        return None
+
+    def _collect_history(self, history, time):
+        """Evaluate FEM and analytical quantities and append to history dict."""
+        H_half    = CONFIG.mesh.H / 2
+        drain_z   = self._drainage_z()
+        nondrain_z = 0.0 if drain_z == H_half else H_half
+
+        # Pressure: maximum at the no-flux (non-drainage) face
+        fem_pressure = self._field_at_z(self.W.sub(1),        nondrain_z, 'max')
+        fem_uz_bot   = self._field_at_z(self.W.sub(0).sub(1), 0.0,        'mean')
+        fem_uz_top   = self._field_at_z(self.W.sub(0).sub(1), H_half,     'mean')
+        fem_volume   = self._compute_volume_drained()
+        p_mean, p_p10, p_p90 = self._pressure_statistics()
+        sig_zz_applied = self._applied_sig_zz(time)
+
+        an_p = self.analytical.pressure_at_base(time)
+        an_u = self.analytical.uz_at_top(time)
+        an_v = self.analytical.volume_drained(time)
+
+        # Settlement: uz at the drainage/loaded face is negative (compression-negative);
+        # the analytical formula gives a positive magnitude.
+        fem_uz_drain   = fem_uz_top if drain_z == H_half else fem_uz_bot
+        fem_settlement = -fem_uz_drain
+
+        tol = 1e-30
+        p_err = 100 * abs(fem_pressure   - an_p) / abs(an_p) if abs(an_p) > tol else float('nan')
+        u_err = 100 * abs(fem_settlement - an_u) / abs(an_u) if abs(an_u) > tol else float('nan')
+        v_err = 100 * abs(fem_volume     - an_v) / abs(an_v) if abs(an_v) > tol else float('nan')
 
         history['times'].append(time)
         history['sig_zz_applied'].append(sig_zz_applied)
-        history['pressure_at_top'].append(fem_pressure)
+        history['pressure_at_base'].append(fem_pressure)
         history['pressure_mean'].append(p_mean)
         history['pressure_p10'].append(p_p10)
         history['pressure_p90'].append(p_p90)
-        history['uz_at_bottom'].append(fem_uz)
+        history['uz_at_bottom'].append(fem_uz_bot)
         history['uz_at_top'].append(fem_uz_top)
         history['volume_drained'].append(fem_volume)
-        history['analytical_pressure'].append(analytical_pressure)
-        history['analytical_uz'].append(analytical_uz)
-        history['analytical_volume'].append(analytical_volume)
-        history['pressure_error_percent'].append(pressure_error)
-        history['uz_error_percent'].append(uz_error)
-        history['volume_error_percent'].append(volume_error)
-    
+        history['analytical_pressure'].append(an_p)
+        history['analytical_uz'].append(an_u)
+        history['analytical_volume'].append(an_v)
+        history['pressure_error_percent'].append(p_err)
+        history['uz_error_percent'].append(u_err)
+        history['volume_error_percent'].append(v_err)
+
     #
     #
-    def _compute_pressure_at_top(self):
-        H_mesh = self.cfg.mesh.H / 2   # mesh top = half of full specimen height
+    def _field_at_z(self, subspace, z_target: float, reduce: str, tol: float = 1e-10):
+        """Return a scalar summary of DOF values in subspace at z ≈ z_target.
 
-        # Get pressure subspace and collapse
-        p_space, p_map = self.W.sub(1).collapse()
+        reduce: 'max' or 'mean'.  Returns 0.0 if no DOFs are found at that height.
+        """
+        space, dof_map = subspace.collapse()
+        values         = self.wh.x.array[dof_map]
+        z_coords       = space.tabulate_dof_coordinates()[:, 1]
+        mask           = np.abs(z_coords - z_target) < tol
+        if not np.any(mask):
+            return 0.0
+        v = values[mask]
+        return float(np.max(v) if reduce == 'max' else np.mean(v))
 
-        # Extract pressure values
-        p_values = self.wh.x.array[p_map]
-
-        # Get DOF coordinates for pressure space
-        dof_coords = p_space.tabulate_dof_coordinates()
-        z_coords = dof_coords[:, 1]
-
-        # Find nodes at top (z ≈ H_mesh)
-        top_mask = np.abs(z_coords - H_mesh) < 1e-10
-        
-        if np.any(top_mask):
-            return np.max(p_values[top_mask])
-        return 0.0
-
-    def _compute_pressure_statistics(self):
-        """Return (mean, P10, P90) of pressure over interior DOFs only.
-        Excludes the drainage boundary (z≈0, P=0 Dirichlet) so that
-        P10 reflects the true low-pressure region, not the forced boundary."""
+    #
+    #
+    def _pressure_statistics(self):
+        """Return (mean, P10, P90) of pressure over interior DOFs (excludes drainage face)."""
+        drain_z        = self._drainage_z()
         p_space, p_map = self.W.sub(1).collapse()
         p_values       = self.wh.x.array[p_map]
-        dof_coords     = p_space.tabulate_dof_coordinates()
-        interior_mask  = dof_coords[:, 1] > 1e-10   # exclude z=0 drainage face
-        p_int = p_values[interior_mask]
+        z_coords       = p_space.tabulate_dof_coordinates()[:, 1]
+        interior       = np.abs(z_coords - drain_z) > 1e-10
+        p_int          = p_values[interior]
         return (float(np.mean(p_int)),
                 float(np.percentile(p_int, 10)),
                 float(np.percentile(p_int, 90)))
 
     #
     #
-    def _compute_uz_at_bottom(self):
-        
-        # Get displacement z-component subspace and collapse
-        uz_space, uz_map = self.W.sub(0).sub(1).collapse()
-        
-        # Extract uz values
-        uz_values = self.wh.x.array[uz_map]
-        
-        # Get DOF coordinates for uz space
-        dof_coords = uz_space.tabulate_dof_coordinates()
-        z_coords = dof_coords[:, 1]
-        
-        # Find nodes at top (z ≈ H)
-        bottom_mask = np.abs(z_coords) < 1e-10
-        
-        if np.any(bottom_mask):
-            return np.mean(uz_values[bottom_mask])
-        return 0.0
-
-    def _compute_uz_at_top(self):
-        H_mesh = self.cfg.mesh.H / 2   # mesh top = half of full specimen height
-        uz_space, uz_map = self.W.sub(0).sub(1).collapse()
-        uz_values = self.wh.x.array[uz_map]
-        dof_coords = uz_space.tabulate_dof_coordinates()
-        z_coords = dof_coords[:, 1]
-        top_mask = np.abs(z_coords - H_mesh) < 1e-10
-        if np.any(top_mask):
-            return np.mean(uz_values[top_mask])
-        return 0.0
-
-    def _get_applied_sig_zz(self, time: float) -> float:
-        """Return the net sig_zz currently applied across all loaded surfaces."""
+    def _applied_sig_zz(self, time: float) -> float:
+        """Sum the currently applied sig_zz across all loaded surfaces."""
         total = 0.0
-        for surface in ['bottom', 'right', 'top', 'left']:
-            bc_spec = getattr(self.cfg.boundary_conditions, surface)
-            if bc_spec.periodic_load is not None:
-                total += bc_spec.periodic_load.eval(time)
-            elif bc_spec.sig_zz is not None:
-                total += bc_spec.sig_zz
+        for surface in SURFACES:
+            bc = getattr(CONFIG.boundary_conditions, surface)
+            if bc.periodic_load is not None:
+                total += bc.periodic_load.eval(time)
+            elif bc.sig_zz is not None:
+                total += bc.sig_zz
         return total
 
     #
     #
     def _compute_volume_drained(self):
-        """
-        Volume variation is calculated as:
-        ΔV = - 2π ∫_Ω (α*ε_v + p/M) * r dΩ
-        """
+        """Compute cumulative drained volume via domain integral of fluid content change.
 
-        # Extract displacement and pressure from solution
+        ΔV = −2π ∫_Ω (α·ε_v + p/M) · r dΩ
+        """
         u, p = ufl.split(self.wh)
-        u_old, p_old = ufl.split(self.wh_old)
-        r = ufl.SpatialCoordinate(self.domain)[0]  # Radial coordinate
+        r    = ufl.SpatialCoordinate(self.domain)[0]
+        dx   = ufl.Measure("dx", domain=self.domain, metadata={"quadrature_degree": 10})
+        integrand = -(self.formulation.alpha * self.formulation.eps_v(u)
+                      + p / self.formulation.M) * 2 * np.pi * r
+        local = fem.assemble_scalar(fem.form(integrand * dx))
+        return float(self.comm.allreduce(local, op=MPI.SUM))
 
-        dx = ufl.Measure("dx", domain=self.domain, metadata={"quadrature_degree": 10})
-        
-        i1 = -(self.formulation.alpha * self.formulation.eps_v(u) + p / self.formulation.M) * 2 * np.pi * r
-        form = fem.form(i1 * dx)
-        l1 = fem.assemble_scalar(form)
-        delta_V = self.comm.allreduce(l1, op=MPI.SUM)
+    # ------------------------------------------------------------------
+    # Timestep recording
+    # ------------------------------------------------------------------
 
-        return delta_V
-    
-    #
-    #
-    def _write_timestep(self, time):
-        uh, ph = self.wh.split()
-        self.u_out.interpolate(uh)
-        self.p_out.interpolate(ph)
-        # stress_vector_out / von_mises_out already updated by _compute_and_project_stresses()
-        self.vtx_writer.write(time)
-
-    
-    #
-    #
-    def _print_load_changes(self, time, prev_loads):
-        """Print a line whenever a periodic load switches level. Returns updated load dict."""
-        current_loads = {}
-        first_call = len(prev_loads) == 0
-        for surface in ['bottom', 'right', 'top', 'left']:
-            bc_spec = getattr(self.cfg.boundary_conditions, surface)
-            if bc_spec.periodic_load is None:
-                continue
-            val = bc_spec.periodic_load.eval(time)
-            current_loads[surface] = val
-            if not first_call and val != prev_loads.get(surface):
-                if self.comm.rank == 0:
-                    prev = prev_loads.get(surface)
-                    prev_str = f"{prev:.3e} Pa" if prev is not None else "none"
-                    print(f"  >> LOAD CHANGE at t={time:.4f}s | {surface} sig_zz: {prev_str} → {val:.3e} Pa")
-        return current_loads
-
-    def _print_progress(self, i_ts, time, dt, history):
-        if self.comm.rank == 0:
-            def _fmt(v):
-                return f"{v:6.2f}%" if v == v else "   n/a"   # nan != nan
-            print(f"Step {i_ts:4d} | t={time:8.3f}s (dt:{dt:6.3}s) | "
-                  f"p_err={_fmt(history['pressure_error_percent'][-1])} | "
-                  f"u_err={_fmt(history['uz_error_percent'][-1])} | "
-                  f"vol_err={_fmt(history['volume_error_percent'][-1])}")
-    
-    _NC_VARS = [
-        'sig_zz_applied',
-        'pressure_at_top', 'pressure_mean', 'pressure_p10', 'pressure_p90',
-        'uz_at_bottom', 'uz_at_top',
-        'volume_drained', 'analytical_pressure', 'analytical_uz',
-        'analytical_volume', 'pressure_error_percent', 'uz_error_percent',
-        'volume_error_percent',
-    ]
-
-    def _open_timeseries_nc(self):
-        if self.comm.rank != 0:
-            return
-        path = self.cfg.output.timeseries
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        ds = nc4.Dataset(path, 'w', format='NETCDF3_64BIT_OFFSET')
-        ds.createDimension('time', None)   # unlimited — grows each step
-        ds.createVariable('time', 'f8', ('time',))
-        for name in self._NC_VARS:
-            ds.createVariable(name, 'f8', ('time',))
-        # Global attributes
-        for k, v in [('E', self.cfg.materials.E), ('nu', self.cfg.materials.nu),
-                     ('alpha', self.cfg.materials.alpha), ('perm', self.cfg.materials.perm),
-                     ('visc', self.cfg.materials.visc), ('M', self.cfg.materials.M),
-                     ('Re', self.cfg.mesh.Re), ('H', self.cfg.mesh.H)]:
-            setattr(ds, k, v)
-        self._nc_ds  = ds
-        self._nc_idx = 0
-        print(f"✓ Timeseries NC opened: {path}")
-
-    def _append_timeseries_record(self, history, time):
-        if self.comm.rank != 0:
-            return
-        i = self._nc_idx
-        self._nc_ds['time'][i] = time
-        for name in self._NC_VARS:
-            self._nc_ds[name][i] = history[name][-1]
-        self._nc_ds.sync()   # flush to disk immediately
-        self._nc_idx += 1
-
-    def _close_timeseries_nc(self):
-        if self.comm.rank != 0:
-            return
-        self._nc_ds.close()
-        print(f"\n✓ FEM timeseries saved: {self.cfg.output.timeseries}")
-    
-    def _setup_invariant_sampler(self):
-        """Build a spatially uniform grid and locate the containing cell for each point."""
-        from dolfinx.geometry import bb_tree, compute_collisions_points, compute_colliding_cells
-
-        n      = self.cfg.output.n_invariant_points
-        Re     = self.cfg.mesh.Re
-        H_mesh = self.cfg.mesh.H / 2   # mesh height = half of full specimen height
-
-        # Regular grid with aspect ratio matching the domain
-        ratio = Re / H_mesh
-        n_z   = max(2, round(np.sqrt(n / ratio)))
-        n_r   = max(2, round(n / n_z))
-        r_1d  = np.linspace(0, Re,     n_r)
-        z_1d  = np.linspace(0, H_mesh, n_z)
-        R, Z  = np.meshgrid(r_1d, z_1d)
-        r_flat = R.ravel();  z_flat = Z.ravel()
-        pts    = np.column_stack([r_flat, z_flat, np.zeros(len(r_flat))])
-
-        # Find which cell contains each grid point
-        tree       = bb_tree(self.domain, self.domain.topology.dim)
-        candidates = compute_collisions_points(tree, pts)
-        colliding  = compute_colliding_cells(self.domain, candidates, pts)
-
-        valid_idx, valid_cells = [], []
-        for i in range(len(pts)):
-            lnk = colliding.links(i)
-            if len(lnk) > 0:
-                valid_idx.append(i)
-                valid_cells.append(int(lnk[0]))
-
-        valid_idx       = np.array(valid_idx)
-        self._inv_pts   = pts[valid_idx]               # (n_valid, 3)
-        self._inv_cells = np.array(valid_cells)        # (n_valid,)
-        self._inv_r     = r_flat[valid_idx]
-        self._inv_z     = z_flat[valid_idx]
-
-        if self.comm.rank == 0:
-            print(f"✓ Invariant sampler: {len(valid_idx)} valid points "
-                  f"on {n_r}×{n_z} regular grid (requested {n})")
-
-    def _open_invariants_nc(self):
-        if self.comm.rank != 0:
-            return
-        path = self.cfg.output.invariants_nc
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        n  = len(self._inv_pts)
-        ds = nc4.Dataset(path, 'w', format='NETCDF3_64BIT_OFFSET')
-        ds.createDimension('point', n)
-        ds.createDimension('time',  None)          # unlimited
-        r_var = ds.createVariable('r',    'f8', ('point',))
-        z_var = ds.createVariable('z',    'f8', ('point',))
-        ds.createVariable('time',   'f8', ('time',))
-        ds.createVariable('I1',     'f4', ('time', 'point'))
-        ds.createVariable('J2',     'f4', ('time', 'point'))
-        ds.createVariable('p_pore', 'f4', ('time', 'point'))
-        ds.createVariable('p_eff',   'f4', ('time', 'point'))
-        ds.createVariable('p_eff_t', 'f4', ('time', 'point'))
-        ds.createVariable('q',       'f4', ('time', 'point'))
-        ds.createVariable('u_r',    'f4', ('time', 'point'))
-        r_var[:] = self._inv_r
-        z_var[:] = self._inv_z
-        r_var.units = 'm';  r_var.long_name = 'Radial coordinate'
-        z_var.units = 'm';  z_var.long_name = 'Axial coordinate'
-        ds['time'].units     = 's'
-        ds['I1'].units       = 'Pa';   ds['I1'].long_name    = 'First stress invariant I1 = tr(sigma_total)'
-        ds['J2'].units       = 'Pa2';  ds['J2'].long_name    = 'Second deviatoric invariant J2 = 0.5*s:s'
-        ds['p_pore'].units   = 'Pa';   ds['p_pore'].long_name = 'Pore pressure'
-        ds['p_eff'].units    = 'Pa';   ds['p_eff'].long_name   = 'Biot effective mean stress = I1/3 + alpha*p_pore'
-        ds['p_eff_t'].units  = 'Pa';   ds['p_eff_t'].long_name = 'Terzaghi effective mean stress = I1/3 + p_pore (alpha=1)'
-        ds['q'].units        = 'Pa';   ds['q'].long_name       = 'Deviatoric stress q = sqrt(3*J2)'
-        ds['u_r'].units      = 'm';    ds['u_r'].long_name    = 'Radial displacement'
-        for k, v in [('E', self.cfg.materials.E), ('nu', self.cfg.materials.nu),
-                     ('alpha', self.cfg.materials.alpha), ('perm', self.cfg.materials.perm),
-                     ('visc', self.cfg.materials.visc), ('M', self.cfg.materials.M),
-                     ('Re', self.cfg.mesh.Re), ('H', self.cfg.mesh.H)]:
-            setattr(ds, k, v)
-        self._inv_ds  = ds
-        self._inv_idx = 0
-        print(f"✓ Invariants NC opened: {path}  ({n} sample points)")
-
-    def _append_invariants_record(self, time):
-        if self.comm.rank != 0:
-            return
-        pts    = self._inv_pts
-        cells  = self._inv_cells
-        srr    = self.sigma_rr_out.eval(pts, cells)[:, 0]
-        stt    = self.sigma_tt_out.eval(pts, cells)[:, 0]
-        szz    = self.sigma_zz_out.eval(pts, cells)[:, 0]
-        srz    = self.sigma_rz_out.eval(pts, cells)[:, 0]
-        p_pore = self.p_out.eval(pts, cells)[:, 0]
-        u_r    = self.u_out.eval(pts, cells)[:, 0]
-        alpha  = self.cfg.materials.alpha
-        I1     = srr + stt + szz
-        p_mean = I1 / 3.0
-        J2     = 0.5 * ((srr - p_mean)**2 + (stt - p_mean)**2 + (szz - p_mean)**2) + srz**2
-        p_eff   = p_mean + alpha * p_pore
-        p_eff_t = p_mean + p_pore            # Terzaghi: alpha=1
-        q       = np.sqrt(np.maximum(3.0 * J2, 0.0))
-        i       = self._inv_idx
-        self._inv_ds['time'][i]       = time
-        self._inv_ds['I1'][i, :]      = I1
-        self._inv_ds['J2'][i, :]      = J2
-        self._inv_ds['p_pore'][i, :]  = p_pore
-        self._inv_ds['p_eff'][i, :]   = p_eff
-        self._inv_ds['p_eff_t'][i, :] = p_eff_t
-        self._inv_ds['q'][i, :]      = q
-        self._inv_ds['u_r'][i, :]    = u_r
-        self._inv_ds.sync()
-        self._inv_idx += 1
-
-    def _close_invariants_nc(self):
-        if self.comm.rank != 0:
-            return
-        self._inv_ds.close()
-        print(f"✓ Invariants saved: {self.cfg.output.invariants_nc}")
-
-    def _open_pressure_profile_nc(self):
-        """Open NetCDF file for vertical line pressure profile."""
-        if self.comm.rank != 0:
-            return
-        path = self.cfg.output.pressure_profile
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        ds = nc4.Dataset(path, 'w', format='NETCDF3_64BIT_OFFSET')
-        
-        # Create dimensions
-        num_points = self.v_sampler.num_points
-        ds.createDimension('z_point', num_points)
-        ds.createDimension('time', None)  # unlimited
-        
-        # Create variables
-        z_var = ds.createVariable('z_coord', 'f8', ('z_point',))
-        time_var = ds.createVariable('time', 'f8', ('time',))
-        pressure_var = ds.createVariable('pressure', 'f8', ('time', 'z_point'))
-        
-        # Store z-coordinates (constant across all timesteps)
-        z_coord = self.v_sampler.get_z_coordinates()
-        z_var[:] = z_coord
-        
-        # Add attributes
-        z_var.units = 'm'
-        z_var.long_name = 'Height along centerline (r=0)'
-        time_var.units = 's'
-        time_var.long_name = 'Time'
-        pressure_var.units = 'Pa'
-        pressure_var.long_name = 'Pore pressure along vertical centerline'
-        
-        # Store material parameters as global attributes
-        for k, v in [('E', self.cfg.materials.E), ('nu', self.cfg.materials.nu),
-                     ('alpha', self.cfg.materials.alpha), ('perm', self.cfg.materials.perm),
-                     ('visc', self.cfg.materials.visc), ('M', self.cfg.materials.M),
-                     ('Re', self.cfg.mesh.Re), ('H', self.cfg.mesh.H)]:
-            setattr(ds, k, v)
-        
-        self._pp_ds = ds
-        self._pp_idx = 0
-        print(f"✓ Pressure profile NC opened: {path}")
-    
-    def _append_pressure_profile_record(self, time):
-        """Append pressure profile at current timestep."""
-        if self.comm.rank != 0:
-            return
-        
-        # Get pressure DOFs and map
+    def _record_timestep(self, time, history):
+        """Write the current timestep to all output files via OutputManager."""
         _, p_map = self.W.sub(1).collapse()
         p_values = self.wh.x.array[p_map]
-        
-        # Sample pressure along centerline
-        pressure_profile = self.v_sampler.sample(p_values)
-        
-        # Append to NetCDF
-        i = self._pp_idx
-        self._pp_ds['time'][i] = time
-        self._pp_ds['pressure'][i, :] = pressure_profile
-        self._pp_ds.sync()
-        self._pp_idx += 1
-    
-    def _close_pressure_profile_nc(self):
-        """Close pressure profile NetCDF file."""
+        record   = {k: history[k][-1] for k in self._HISTORY_KEYS if k != 'times'}
+        self._output.write(time, record, p_values)
+
+    # ------------------------------------------------------------------
+    # Console output
+    # ------------------------------------------------------------------
+
+    def _print_load_changes(self, time):
+        """Print a message whenever a periodic load switches level."""
+        current_loads = {}
+        first_call    = len(self._prev_loads) == 0
+        for surface in SURFACES:
+            bc = getattr(CONFIG.boundary_conditions, surface)
+            if bc.periodic_load is None:
+                continue
+            val = bc.periodic_load.eval(time)
+            current_loads[surface] = val
+            if not first_call and val != self._prev_loads.get(surface):
+                if self.comm.rank == 0:
+                    prev     = self._prev_loads.get(surface)
+                    prev_str = f"{prev:.3e} Pa" if prev is not None else "none"
+                    print(f"  >> LOAD CHANGE at t={time:.4f}s | "
+                          f"{surface} sig_zz: {prev_str} → {val:.3e} Pa")
+        self._prev_loads = current_loads
+
+    #
+    #
+    def _print_progress(self, i_ts, time, dt, history):
         if self.comm.rank != 0:
             return
-        self._pp_ds.close()
-        print(f"✓ Pressure profile saved: {self.cfg.output.pressure_profile}")
-    
-    #
-    #
-    def summary(self):
+        def _fmt(v):
+            return f"{v:6.2f}%" if v == v else "   n/a"
+        print(f"Step {i_ts:4d} | t={time:8.3f}s (dt:{dt:6.3}s) | "
+              f"p_err={_fmt(history['pressure_error_percent'][-1])} | "
+              f"u_err={_fmt(history['uz_error_percent'][-1])} | "
+              f"vol_err={_fmt(history['volume_error_percent'][-1])}")
+
+    # ------------------------------------------------------------------
+    # Summary and persistence
+    # ------------------------------------------------------------------
+
+    def summary(self) -> str:
+        """Return a human-readable results summary (call after solve())."""
         if self.history is None:
             return "No results available. Run solve() first."
-        
-        lines = []
-        lines.append("\n" + "="*70)
-        lines.append("SIMULATION RESULTS")
-        lines.append("="*70)
-        lines.append(f"\nTimeseries: {self.cfg.output.timeseries}")
-        lines.append(f"\nFinal State (t={self.history['times'][-1]:.3f}s):")
-        lines.append(f"  Pressure at top:  {self.history['pressure_at_top'][-1]:.6e} Pa")
-        lines.append(f"  Displacement at bottom: {self.history['uz_at_bottom'][-1]:.6e} m")
-        lines.append(f"  Volume drained:      {self.history['volume_drained'][-1]:.6e} m³")
-        lines.append(f"\nErrors vs Analytical:")
-        lines.append(f"  Pressure error:      {self.history['pressure_error_percent'][-1]:.2f}%")
-        lines.append(f"  Displacement error:  {self.history['uz_error_percent'][-1]:.2f}%")
-        lines.append(f"  Volume error:        {self.history['volume_error_percent'][-1]:.2f}%")
-        lines.append("="*70)
+        h = self.history
+        lines = [
+            "\n" + "=" * 70,
+            "SIMULATION RESULTS",
+            "=" * 70,
+            f"\nTimeseries: {CONFIG.output.timeseries}",
+            f"\nFinal State (t={h['times'][-1]:.3f}s):",
+            f"  Pressure at base:       {h['pressure_at_base'][-1]:.6e} Pa",
+            f"  Displacement at bottom: {h['uz_at_bottom'][-1]:.6e} m",
+            f"  Volume drained:         {h['volume_drained'][-1]:.6e} m³",
+            f"\nErrors vs Analytical:",
+            f"  Pressure error:         {h['pressure_error_percent'][-1]:.2f}%",
+            f"  Displacement error:     {h['uz_error_percent'][-1]:.2f}%",
+            f"  Volume error:           {h['volume_error_percent'][-1]:.2f}%",
+            "=" * 70,
+        ]
         return "\n".join(lines)
 
     #
     #
-    def _save_run_summary(self) :
+    def _save_run_summary(self):
+        """Persist key config + final-state values to a pickle for sweep post-processing."""
+        h = self.history
         data = {
-            'run_id': self.cfg.general.run_id,
-            'run_dir': self.cfg.general.run_dir,
-            'description': self.cfg.general.description,
-            'tags': self.cfg.general.tags,
-            'E': self.cfg.materials.E,
-            'nu': self.cfg.materials.nu,
-            'alpha': self.cfg.materials.alpha,
-            'perm': self.cfg.materials.perm,
-            'visc': self.cfg.materials.visc,
-            'M': self.cfg.materials.M,
-            'Re': self.cfg.mesh.Re,
-            'H': self.cfg.mesh.H,
-            'Re/H': self.cfg.mesh.Re/self.cfg.mesh.H,
-            'final_time': self.history['times'][-1],
-            'pressure_at_top': self.history['pressure_at_top'][-1],
-            'uz_at_bottom': self.history['uz_at_bottom'][-1],
-            'volume_drained': self.history['volume_drained'][-1],
-            'pressure_error_percent': self.history['pressure_error_percent'][-1],
-            'uz_error_percent': self.history['uz_error_percent'][-1],
-            'volume_error_percent': self.history['volume_error_percent'][-1],
+            'run_id':                 CONFIG.general.run_id,
+            'run_dir':                CONFIG.general.run_dir,
+            'description':            CONFIG.general.description,
+            'tags':                   CONFIG.general.tags,
+            'E':                      CONFIG.materials.E,
+            'nu':                     CONFIG.materials.nu,
+            'alpha':                  CONFIG.materials.alpha,
+            'perm':                   CONFIG.materials.perm,
+            'visc':                   CONFIG.materials.visc,
+            'M':                      CONFIG.materials.M,
+            'Re':                     CONFIG.mesh.Re,
+            'H':                      CONFIG.mesh.H,
+            'Re/H':                   CONFIG.mesh.Re / CONFIG.mesh.H,
+            'final_time':             h['times'][-1],
+            'pressure_at_base':       h['pressure_at_base'][-1],
+            'uz_at_bottom':           h['uz_at_bottom'][-1],
+            'volume_drained':         h['volume_drained'][-1],
+            'pressure_error_percent': h['pressure_error_percent'][-1],
+            'uz_error_percent':       h['uz_error_percent'][-1],
+            'volume_error_percent':   h['volume_error_percent'][-1],
         }
-        import pandas as pd
-        df = pd.DataFrame([data])
-
-        output_dir = os.path.dirname(self.cfg.output.results)
-        df.to_pickle(f'{output_dir}/summary.pkl')        
+        output_dir = os.path.dirname(CONFIG.output.results)
+        pd.DataFrame([data]).to_pickle(f"{output_dir}/summary.pkl")
