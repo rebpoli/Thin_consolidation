@@ -33,8 +33,8 @@ max_time = args.max_time
 
 # ── Sweep definitions (must match run_all.py) ─────────────────────────────────
 PHI_VALUES   = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
-ALPHA_VALUES = [0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
-PERM_VALUES  = [1e-21, 1e-20, 1e-19, 1e-18, 1e-17, 1e-16]
+ALPHA_VALUES = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90]
+PERM_VALUES  = [1e-18, 1e-19, 1e-20, 1e-21, 1e-22]
 
 def _fmt_perm(v):
     s = f"{v:.2e}"; m, e = s.split("e")
@@ -44,7 +44,7 @@ SWEEPS = {
     "phi":   {"labels": [f"phi_{v:.2f}"   for v in PHI_VALUES],
               "values": PHI_VALUES,
               "fmt":    lambda v: f"$\\phi={v*100:.0f}$%",
-              "title":  "$\\phi$ sweep  ($\\alpha=0.50$, $k=10^{-20}$ m²)"},
+              "title":  "$\\phi$ sweep  ($\\alpha=0.75$, $k=10^{-20}$ m²)"},
     "alpha": {"labels": [f"alpha_{v:.2f}" for v in ALPHA_VALUES],
               "values": ALPHA_VALUES,
               "fmt":    lambda v: f"$\\alpha={v:.2f}$",
@@ -52,7 +52,7 @@ SWEEPS = {
     "perm":  {"labels": [f"perm_{_fmt_perm(v)}" for v in PERM_VALUES],
               "values": PERM_VALUES,
               "fmt":    lambda v: f"$k={_fmt_perm(v)}$ m²",
-              "title":  "$k$ sweep  ($\\phi=0.10$, $\\alpha=0.50$)"},
+              "title":  "$k$ sweep  ($\\phi=0.10$, $\\alpha=0.75$)"},
 }
 SWEEP_ORDER = ["phi", "alpha", "perm"]
 N_COLS = 3
@@ -202,9 +202,9 @@ for c, sw in enumerate(SWEEP_ORDER):
 # ── Suptitle ──────────────────────────────────────────────────────────────────
 fig.suptitle(
     "OAT-DRAINED — Sensitivity, drained lateral boundary (right: P=0, free)  |  "
-    "E=3 GPa, ν=0.2, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
+    "E=5 GPa, ν=0.40, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
     "H=1.0 cm (H/2=0.5 cm drainage path), Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
-    "base: φ=0.10, α=0.50, k=1e-20 m²",
+    "base: φ=0.10, α=0.75, k=1e-20 m²",
     fontsize=9)
 
 # ── Save ──────────────────────────────────────────────────────────────────────

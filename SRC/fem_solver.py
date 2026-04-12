@@ -92,19 +92,22 @@ class PoroelasticitySolver:
         V_out = fem.functionspace(self.domain, element("Lagrange", cell_name, 1, shape=(self.gdim,)))
         Q_out = fem.functionspace(self.domain, element("Lagrange", cell_name, 1))
 
-        self.u_out         = fem.Function(V_out, name="Displacement")
-        self.p_out         = fem.Function(Q_out, name="Pressure")
-        self.sigma_rr_out  = fem.Function(Q_out, name="sigma_rr")
-        self.sigma_tt_out  = fem.Function(Q_out, name="sigma_tt")
-        self.sigma_zz_out  = fem.Function(Q_out, name="sigma_zz")
-        self.sigma_rz_out  = fem.Function(Q_out, name="sigma_rz")
-        self.von_mises_out = fem.Function(Q_out, name="von_Mises")
+        self.u_out              = fem.Function(V_out, name="Displacement")
+        self.p_out              = fem.Function(Q_out, name="Pressure")
+        self.sigma_rr_out       = fem.Function(Q_out, name="sigma_rr")
+        self.sigma_tt_out       = fem.Function(Q_out, name="sigma_tt")
+        self.sigma_zz_out       = fem.Function(Q_out, name="sigma_zz")
+        self.sigma_rz_out       = fem.Function(Q_out, name="sigma_rz")
+        self.von_mises_out      = fem.Function(Q_out, name="von_Mises")
+        self.sig_rr_eff_terz_out = fem.Function(Q_out, name="sig_rr_eff_terz")
+        self.sig_zz_eff_terz_out = fem.Function(Q_out, name="sig_zz_eff_terz")
 
         self._output.configure_vtx(
             self.domain.comm,
             [self.u_out, self.p_out,
              self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
-             self.sigma_rz_out, self.von_mises_out],
+             self.sigma_rz_out, self.von_mises_out,
+             self.sig_rr_eff_terz_out, self.sig_zz_eff_terz_out],
             self.sigma_rr_out, self.sigma_tt_out, self.sigma_zz_out,
             self.sigma_rz_out, self.p_out, self.u_out,
         )
@@ -189,12 +192,15 @@ class PoroelasticitySolver:
         """Project UFL stress expressions to Lagrange-1 and interpolate u, p."""
         sigma_rr, sigma_tt, sigma_zz, sigma_rz, von_mises = \
             self.formulation.compute_stress_components(self.wh)
+        _, p_ufl = ufl.split(self.wh)
         for expr, func in [
-            (sigma_rr,  self.sigma_rr_out),
-            (sigma_tt,  self.sigma_tt_out),
-            (sigma_zz,  self.sigma_zz_out),
-            (sigma_rz,  self.sigma_rz_out),
-            (von_mises, self.von_mises_out),
+            (sigma_rr,          self.sigma_rr_out),
+            (sigma_tt,          self.sigma_tt_out),
+            (sigma_zz,          self.sigma_zz_out),
+            (sigma_rz,          self.sigma_rz_out),
+            (von_mises,         self.von_mises_out),
+            (sigma_rr + p_ufl,  self.sig_rr_eff_terz_out),
+            (sigma_zz + p_ufl,  self.sig_zz_eff_terz_out),
         ]:
             self._project_scalar(expr, func)
             func.x.scatter_forward()

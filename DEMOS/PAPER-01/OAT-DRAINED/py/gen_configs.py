@@ -53,8 +53,8 @@ _CompactDumper.add_representer(
 )
 
 # ── Shared material / geometry constants ───────────────────────────────────────
-_E     = 3.0e9
-_nu    = 0.2
+_E     = 5.0e9
+_nu    = 0.40
 _visc  = 1.0e-3
 _Kf    = 2.2e9
 _H     = 0.010
@@ -63,7 +63,7 @@ _N     = 30
 _mu    = _E / (2 * (1 + _nu))
 
 _PHI_BASE   = 0.10
-_ALPHA_BASE = 0.50
+_ALPHA_BASE = 0.75
 _PERM_BASE  = 1.0e-20
 
 _L0      = 0.0
@@ -72,8 +72,8 @@ _T_START = 50.0
 _T_END   = 36000.0
 
 PHI_VALUES   = np.array([0.05, 0.10, 0.15, 0.20, 0.25, 0.30])
-ALPHA_VALUES = np.array([0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00])
-PERM_VALUES  = np.array([1e-21, 1e-20, 1e-19, 1e-18, 1e-17, 1e-16])
+ALPHA_VALUES = np.array([0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90])
+PERM_VALUES  = np.array([1e-18, 1e-19, 1e-20, 1e-21, 1e-22])
 
 # ── Derived quantities ─────────────────────────────────────────────────────────
 def _M(phi):

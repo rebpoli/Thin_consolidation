@@ -196,7 +196,7 @@ ax_p[0].legend(handles=leg_handles, fontsize=7, loc="upper right",
 # ── Suptitle ──────────────────────────────────────────────────────────────────
 fig.suptitle(
     "OAT-SEALED vs OAT-DRAINED — Sealed vs Drained Lateral Boundary  |  "
-    "E=3 GPa, ν=0.2, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
+    "E=10 GPa, ν=0.35, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
     "H=1.0 cm (H/2=0.5 cm drainage path), Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
     "base: φ=0.10, α=0.50, k=1e-20 m²  |  each family: all sweep values overlaid",
     fontsize=9)

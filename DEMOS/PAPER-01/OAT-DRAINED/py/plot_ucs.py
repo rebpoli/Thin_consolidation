@@ -144,7 +144,7 @@ for col, sw in enumerate(SWEEPS):
     ax2.tick_params(which="both", labelsize=7)
     ax.tick_params(axis="y", colors="#1f77b4")
     ax2.tick_params(axis="y", colors="#d62728")
-    ax.set_ylim(10, 24)
+    ax.set_ylim(6, 12)
     ax2.set_ylim(0, 9)
     ax.set_title(sw["title"], fontsize=8, pad=4)
     ax.grid(True, alpha=0.25)
