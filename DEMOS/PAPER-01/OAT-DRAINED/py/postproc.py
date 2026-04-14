@@ -23,8 +23,8 @@ RUNS_DIR = DEMO_DIR / "runs"
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Demo 14 OAT sensitivity plot (drained side)")
-parser.add_argument("--min-time", type=float, default=49.0,
-                    help="Minimum time to plot [s] (default: 49 — just before load step)")
+parser.add_argument("--min-time", type=float, default=0.0,
+                    help="Minimum time to plot [s] (default: 0)")
 parser.add_argument("--max-time", type=float, default=20000.0,
                     help="Maximum time to plot [s] (default: 20000)")
 args = parser.parse_args()
@@ -118,7 +118,7 @@ def _plot_pressure(ax, ds, color, label, max_time=None):
         return
     t, mk = _mask(ds, min_time, max_time)
     t = t[mk] / 60.0   # s → min
-    pos = t > 0
+    pos = t >= 0
     if "pressure_mean" in ds and "pressure_p10" in ds and "pressure_p90" in ds:
         p_mean = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
         p_p10  = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-1, None)
@@ -135,7 +135,7 @@ def _plot_uz(ax, ds, color, label, max_time=None):
         return
     t, mk = _mask(ds, min_time, max_time)
     t_plot = t[mk] / 60.0   # s → min
-    pos = t_plot > 0
+    pos = t_plot >= 0
     uz  = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
     ax.plot(t_plot[pos], uz, color=color, linewidth=1.5, label=label, zorder=3)
 
@@ -146,7 +146,7 @@ def _draw_load(ax, ds, max_time=None):
     t, mk = _mask(ds, min_time, max_time)
     t_plot = t[mk] / 60.0   # s → min
     sig    = ds["sig_zz_applied"].values[mk] / 1e6
-    pos = t_plot > 0
+    pos = t_plot >= 0
     ax.step(t_plot[pos], sig[pos], color="crimson", linewidth=1.0, where="post", zorder=2)
     ax.fill_between(t_plot[pos], sig[pos], step="post", color="crimson", alpha=0.15, zorder=1)
     ax.set_xscale("log")

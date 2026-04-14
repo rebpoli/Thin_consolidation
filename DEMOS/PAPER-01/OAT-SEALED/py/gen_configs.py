@@ -69,7 +69,7 @@ _PERM_BASE  = 1.0e-20
 # Load
 _L0      = 0.0
 _L1      = -10.0e6       # −10 MPa step
-_T_START = 50.0          # ramp-up time [s]
+_T_START = 0.0           # load applied at t=0
 _T_END   = 36000.0       # end time [s] = 10 hours
 
 # Sweep values

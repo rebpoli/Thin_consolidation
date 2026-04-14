@@ -28,8 +28,8 @@ D14_RUNS    = PAPER01_DIR / "OAT-DRAINED" / "runs"
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Compare OAT-SEALED vs OAT-DRAINED")
-parser.add_argument("--min-time", type=float, default=49.0,
-                    help="Minimum time to plot [s] (default: 49)")
+parser.add_argument("--min-time", type=float, default=0.0,
+                    help="Minimum time to plot [s] (default: 0)")
 parser.add_argument("--max-time", type=float, default=20000.0,
                     help="Maximum time to plot [s] (default: 20000)")
 args = parser.parse_args()
@@ -84,7 +84,7 @@ def _plot_pressure(ax, ds, **kw):
     if ds is None:
         return
     t, mk = _mask(ds)
-    t = t[mk] / 60.0; pos = t > 0   # s → min
+    t = t[mk] / 60.0; pos = t >= 0   # s → min
     if "pressure_mean" in ds:
         p = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
     elif "pressure_at_base" in ds:
@@ -98,7 +98,7 @@ def _plot_uz(ax, ds, **kw):
     if ds is None or "uz_at_top" not in ds:
         return
     t, mk = _mask(ds)
-    t = t[mk] / 60.0; pos = t > 0   # s → min
+    t = t[mk] / 60.0; pos = t >= 0   # s → min
     uz = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
     ax.plot(t[pos], uz, **kw)
 
@@ -108,7 +108,7 @@ def _draw_load(ax, ds):
         return
     t, mk = _mask(ds)
     t = t[mk] / 60.0; sig = ds["sig_zz_applied"].values[mk] / 1e6   # s → min
-    pos = t > 0
+    pos = t >= 0
     ax.step(t[pos], sig[pos], color="crimson", lw=1.0, where="post", zorder=2)
     ax.fill_between(t[pos], sig[pos], step="post", color="crimson", alpha=0.15, zorder=1)
     ax.set_xscale("log")
