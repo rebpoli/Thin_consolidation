@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""OAT-DRAINED — sensitivity plot (drained lateral boundary).
+"""OAT-DRAINED — sensitivity plots (paper style, one 90×60mm PNG per panel).
 
-Three columns, one per sweep (phi | alpha | perm).
-Rows: pressure (log y) | uz | load track.
+Outputs:
+    png/oat_drained_{sw}_p.png
+    png/oat_drained_{sw}_uz.png (with strain secondary axis)
+    png/oat_drained_sensitivity.md
 
 USAGE:
     ./py/postproc.py
@@ -11,27 +13,48 @@ USAGE:
 import argparse
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib as mpl
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import matplotlib.cm as cm
 from pathlib import Path
 
-DEMO_DIR = Path(__file__).resolve().parents[1]   # OAT-DRAINED/
+# ── Paper style ───────────────────────────────────────────────────────────────
+MM = 1 / 25.4
+FIG_W_MM = 90
+FIG_H_MM = 60
+XMIN_MIN = 1e-3
+mpl.rcParams.update({
+    'font.size':         6,   'font.weight':       'normal',
+    'axes.titlesize':    7,   'axes.titleweight':  'normal',
+    'axes.labelsize':    6,   'axes.labelweight':  'normal',
+    'xtick.labelsize':   6,   'ytick.labelsize':   6,
+    'legend.fontsize':   5,   'legend.handlelength': 1.2,
+    'lines.linewidth':   0.8,
+    'axes.linewidth':    0.5,
+    'xtick.major.width': 0.5, 'ytick.major.width': 0.5,
+    'xtick.minor.width': 0.4, 'ytick.minor.width': 0.4,
+    'xtick.major.size':  2.5, 'ytick.major.size':  2.5,
+    'xtick.minor.size':  1.5, 'ytick.minor.size':  1.5,
+    'grid.linewidth':    0.4,
+    'pdf.fonttype': 42,       'ps.fonttype':  42,
+})
+
+DEMO_DIR = Path(__file__).resolve().parents[1]
 RUNS_DIR = DEMO_DIR / "runs"
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Demo 14 OAT sensitivity plot (drained side)")
-parser.add_argument("--min-time", type=float, default=0.0,
-                    help="Minimum time to plot [s] (default: 0)")
-parser.add_argument("--max-time", type=float, default=20000.0,
-                    help="Maximum time to plot [s] (default: 20000)")
-args = parser.parse_args()
-min_time = args.min_time
+parser = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("--min-time", type=float, default=0.0)
+parser.add_argument("--max-time", type=float, default=20000.0)
+args     = parser.parse_args()
 max_time = args.max_time
 
-# ── Sweep definitions (must match run_all.py) ─────────────────────────────────
+H_OAT = 0.01
+
+# ── Sweep definitions ─────────────────────────────────────────────────────────
 PHI_VALUES   = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
 ALPHA_VALUES = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90]
 PERM_VALUES  = [1e-18, 1e-19, 1e-20, 1e-21, 1e-22]
@@ -41,21 +64,36 @@ def _fmt_perm(v):
     return f"{m.rstrip('0').rstrip('.')}e{int(e)}"
 
 SWEEPS = {
-    "phi":   {"labels": [f"phi_{v:.2f}"   for v in PHI_VALUES],
+    "phi":   {"labels": [f"phi_{v:.2f}"        for v in PHI_VALUES],
               "values": PHI_VALUES,
-              "fmt":    lambda v: f"$\\phi={v*100:.0f}$%",
-              "title":  "$\\phi$ sweep  ($\\alpha=0.75$, $k=10^{-20}$ m²)"},
-    "alpha": {"labels": [f"alpha_{v:.2f}" for v in ALPHA_VALUES],
+              "fmt":    lambda v: f"$\\phi={v*100:.0f}\\%$",
+              "ncol":   2},
+    "alpha": {"labels": [f"alpha_{v:.2f}"       for v in ALPHA_VALUES],
               "values": ALPHA_VALUES,
               "fmt":    lambda v: f"$\\alpha={v:.2f}$",
-              "title":  "$\\alpha$ sweep  ($\\phi=0.10$, $k=10^{-20}$ m²)"},
+              "ncol":   2},
     "perm":  {"labels": [f"perm_{_fmt_perm(v)}" for v in PERM_VALUES],
               "values": PERM_VALUES,
-              "fmt":    lambda v: f"$k={_fmt_perm(v)}$ m²",
-              "title":  "$k$ sweep  ($\\phi=0.10$, $\\alpha=0.75$)"},
+              "fmt":    lambda v: f"$k={_fmt_perm(v)}$ (m$^2$)",
+              "ncol":   1},
 }
-SWEEP_ORDER = ["phi", "alpha", "perm"]
-N_COLS = 3
+
+PALETTES = {
+    "phi":   cm.gray(np.linspace(0.7, 0.1, len(PHI_VALUES))),
+    "alpha": cm.gray(np.linspace(0.7, 0.1, len(ALPHA_VALUES))),
+    "perm":  cm.gray(np.linspace(0.7, 0.1, len(PERM_VALUES))),
+}
+
+LEGEND_STYLE = dict(
+    framealpha=1.0,
+    fancybox=False,
+    edgecolor="black",
+    facecolor="white",
+    labelspacing=0.15,
+    borderpad=0.3,
+    handletextpad=0.3,
+    columnspacing=0.5,
+)
 
 # ── Load datasets ─────────────────────────────────────────────────────────────
 data = {sw: {} for sw in SWEEPS}
@@ -69,147 +107,127 @@ for sw, spec in SWEEPS.items():
                 print(f"  Warning: {label}: {e}")
 
 for sw, spec in SWEEPS.items():
-    n = len(data[sw])
-    print(f"{sw} sweep: {n}/{len(spec['labels'])} cases available")
+    print(f"{sw}: {len(data[sw])}/{len(spec['labels'])} cases")
 
-total = sum(len(v) for v in data.values())
-if total == 0:
-    raise FileNotFoundError(f"No output files found under {RUNS_DIR}. Run run_all.py first.")
-
-# ── Figure layout ─────────────────────────────────────────────────────────────
-# 3 cols × 3 rows: pressure (log) | uz | load
-fig = plt.figure(figsize=(15, 9))
-gs  = gridspec.GridSpec(3, N_COLS, figure=fig,
-                        height_ratios=[4, 3, 1],
-                        hspace=0.10, wspace=0.30,
-                        top=0.91, bottom=0.07,
-                        left=0.07, right=0.97)
-
-ax_p    = [fig.add_subplot(gs[0, c]) for c in range(N_COLS)]
-ax_uz   = [fig.add_subplot(gs[1, c]) for c in range(N_COLS)]
-ax_load = [fig.add_subplot(gs[2, c]) for c in range(N_COLS)]
-
-# Share x within each column
-for c in range(N_COLS):
-    ax_uz[c].sharex(ax_p[c])
-    ax_load[c].sharex(ax_p[c])
-
-# ── Color palettes ────────────────────────────────────────────────────────────
-PALETTES = {
-    "phi":   cm.Blues(np.linspace(0.35, 0.95, len(PHI_VALUES))),
-    "alpha": cm.Oranges(np.linspace(0.35, 0.95, len(ALPHA_VALUES))),
-    "perm":  cm.Purples(np.linspace(0.35, 0.95, len(PERM_VALUES))),
-}
+if sum(len(v) for v in data.values()) == 0:
+    raise FileNotFoundError(f"No outputs under {RUNS_DIR}. Run make run first.")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _mask(ds, min_time, max_time):
-    t  = ds["time"].values
+def _mask(ds):
+    t = ds["time"].values / 60.0
     mk = np.ones(len(t), bool)
-    if min_time is not None:
-        mk &= (t >= min_time)
-    if max_time is not None:
-        mk &= (t <= max_time)
+    if max_time is not None: mk &= (t <= max_time / 60.0)
     return t, mk
 
-
-def _plot_pressure(ax, ds, color, label, max_time=None):
-    if ds is None:
+def _plot_pressure(ax, ds, color, label):
+    if ds is None: return
+    t, mk = _mask(ds)
+    t_s = t[mk]
+    pos = t_s > 0
+    if not np.any(pos):
         return
-    t, mk = _mask(ds, min_time, max_time)
-    t = t[mk] / 60.0   # s → min
-    pos = t >= 0
     if "pressure_mean" in ds and "pressure_p10" in ds and "pressure_p90" in ds:
-        p_mean = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
-        p_p10  = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-1, None)
-        p_p90  = np.clip(ds["pressure_p90"].values[mk][pos]  / 1e3, 1e-1, None)
-        ax.plot(t[pos], p_mean, color=color, linewidth=1.5, label=label, zorder=3)
-        ax.fill_between(t[pos], p_p10, p_p90, color=color, alpha=0.20, linewidth=0, zorder=2)
+        pm   = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
+        pp10 = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-1, None)
+        pp90 = np.clip(ds["pressure_p90"].values[mk][pos]  / 1e3, 1e-1, None)
+        ax.plot(t_s[pos], pm, color=color, label=label, zorder=3)
+        ax.fill_between(t_s[pos], pp10, pp90, color=color, alpha=0.15,
+                        linewidth=0, zorder=2)
     elif "pressure_at_base" in ds:
         p = np.clip(ds["pressure_at_base"].values[mk][pos] / 1e3, 1e-1, None)
-        ax.plot(t[pos], p, color=color, linewidth=1.5, linestyle="--", label=label, zorder=3)
+        ax.plot(t_s[pos], p, color=color, linestyle="--", label=label, zorder=3)
 
-
-def _plot_uz(ax, ds, color, label, max_time=None):
-    if ds is None or "uz_at_top" not in ds:
+def _plot_uz(ax, ds, color, label):
+    if ds is None or "uz_at_top" not in ds: return
+    t, mk = _mask(ds)
+    t_s = t[mk]
+    pos = t_s > 0
+    if not np.any(pos):
         return
-    t, mk = _mask(ds, min_time, max_time)
-    t_plot = t[mk] / 60.0   # s → min
-    pos = t_plot >= 0
-    uz  = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
-    ax.plot(t_plot[pos], uz, color=color, linewidth=1.5, label=label, zorder=3)
+    uz = ds["uz_at_top"].values[mk][pos] * 2e6
+    ax.plot(t_s[pos], uz, color=color, label=label, zorder=3)
 
-
-def _draw_load(ax, ds, max_time=None):
-    if ds is None or "sig_zz_applied" not in ds:
-        return
-    t, mk = _mask(ds, min_time, max_time)
-    t_plot = t[mk] / 60.0   # s → min
-    sig    = ds["sig_zz_applied"].values[mk] / 1e6
-    pos = t_plot >= 0
-    ax.step(t_plot[pos], sig[pos], color="crimson", linewidth=1.0, where="post", zorder=2)
-    ax.fill_between(t_plot[pos], sig[pos], step="post", color="crimson", alpha=0.15, zorder=1)
+def _fmt_xaxis(ax):
     ax.set_xscale("log")
-    ax.set_ylabel("$\\sigma_{zz}$ [MPa]", fontsize=7, labelpad=2)
-    ax.set_xlabel("Time [min]", fontsize=8)
-    ax.tick_params(which="both", labelsize=7)
-    ax.xaxis.set_major_locator(plt.LogLocator(base=10, subs=[1, 2, 5]))
+    ax.xaxis.set_major_locator(plt.LogLocator(base=10, subs=[1]))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:g}"))
     ax.xaxis.set_minor_locator(plt.NullLocator())
-    ax.grid(True, which="both", alpha=0.25, zorder=0)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(3))
+    ax.set_xlim(XMIN_MIN, max_time / 60.0)
+    ax.margins(x=0)
+    ax.set_xlabel("Time (min)")
 
+def _new_fig():
+    fig, ax = plt.subplots(figsize=(FIG_W_MM * MM, FIG_H_MM * MM))
+    return fig, ax
 
-# ── Draw ──────────────────────────────────────────────────────────────────────
+def _save(fig, path):
+    fig.savefig(path, dpi=500, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"Saved {path}")
 
-for c, sw in enumerate(SWEEP_ORDER):
-    spec    = SWEEPS[sw]
+# ── One figure per sweep and variable ─────────────────────────────────────────
+png_dir = DEMO_DIR / "png"
+png_dir.mkdir(exist_ok=True)
+
+for sw, spec in SWEEPS.items():
     palette = PALETTES[sw]
+    ncol = spec["ncol"]
 
+    fig_p, ax_p = _new_fig()
     for i, (label, val) in enumerate(zip(spec["labels"], spec["values"])):
         ds    = data[sw].get(label)
         color = palette[i]
         fmt   = spec["fmt"](val)
-        _plot_pressure(ax_p[c],  ds, color, fmt, max_time=max_time)
-        _plot_uz(ax_uz[c],       ds, color, fmt, max_time=max_time)
+        _plot_pressure(ax_p, ds, color, fmt)
+    ax_p.set_yscale("log")
+    ax_p.set_ylim(bottom=1e-1)
+    ax_p.set_ylabel("$P$ (kPa)")
+    ax_p.grid(True, which="both", alpha=0.25, zorder=0)
+    p_legend_loc = "lower left" if sw in {"perm", "alpha"} else "upper right"
+    leg_p = ax_p.legend(loc=p_legend_loc, ncol=ncol, **LEGEND_STYLE)
+    leg_p.get_frame().set_linewidth(0.3)
+    _fmt_xaxis(ax_p)
+    _save(fig_p, png_dir / f"oat_drained_{sw}_p.png")
 
-    # Pressure axis — log-log
-    ax_p[c].set_yscale("log")
-    ax_p[c].set_xscale("log")
-    ax_p[c].set_ylim(bottom=1e-1)
-    ax_p[c].set_ylabel("Pressure [kPa]", fontsize=8)
-    ax_p[c].tick_params(which="both", labelsize=7)
-    plt.setp(ax_p[c].get_xticklabels(which="both"), visible=False)
-    ax_p[c].grid(True, which="both", alpha=0.25, zorder=0)
-    ax_p[c].set_title(spec["title"], fontsize=9, pad=4)
-    ax_p[c].legend(fontsize=6, loc="upper right", framealpha=0.7,
-                   ncol=1, handlelength=1.2, labelspacing=0.3)
+    fig_u, ax_u = _new_fig()
+    for i, (label, val) in enumerate(zip(spec["labels"], spec["values"])):
+        ds    = data[sw].get(label)
+        color = palette[i]
+        fmt   = spec["fmt"](val)
+        _plot_uz(ax_u, ds, color, fmt)
+    ax_u.set_ylabel("$u_z$ (μm)")
+    ax_u.grid(True, which="both", alpha=0.25, zorder=0)
 
-    # uz axis — log time
-    ax_uz[c].set_xscale("log")
-    ax_uz[c].set_ylabel("$u_z$ (total displacement) [μm]", fontsize=8)
-    ax_uz[c].tick_params(which="both", labelsize=7)
-    plt.setp(ax_uz[c].get_xticklabels(which="both"), visible=False)
-    ax_uz[c].grid(True, which="both", alpha=0.25, zorder=0)
-    if c == 0:
-        ax_uz[c].legend(fontsize=6, loc="lower right", framealpha=0.7,
-                        ncol=1, handlelength=1.2, labelspacing=0.3)
+    # Add secondary y-axis for strain
+    ax_u_eps = ax_u.twinx()
+    ax_u_eps.set_ylabel("$\\varepsilon_{zz}$ (‰)")
+    y_min, y_max = ax_u.get_ylim()
+    ax_u_eps.set_ylim(y_min / 10, y_max / 10)
 
-    # Load track
-    first_ds = next(iter(data[sw].values()), None)
-    _draw_load(ax_load[c], first_ds, max_time=max_time)
+    leg_u = ax_u.legend(loc="best", ncol=ncol, **LEGEND_STYLE)
+    leg_u.get_frame().set_linewidth(0.3)
+    _fmt_xaxis(ax_u)
+    _save(fig_u, png_dir / f"oat_drained_{sw}_uz.png")
 
-# ── Suptitle ──────────────────────────────────────────────────────────────────
-fig.suptitle(
-    "OAT-DRAINED — Sensitivity, drained lateral boundary (right: P=0, free)  |  "
-    "E=5 GPa, ν=0.40, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
-    "H=1.0 cm (H/2=0.5 cm drainage path), Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
-    "base: φ=0.10, α=0.75, k=1e-20 m²",
-    fontsize=9)
-
-# ── Save ──────────────────────────────────────────────────────────────────────
-png_dir = DEMO_DIR / "png"
-png_dir.mkdir(exist_ok=True)
-out = png_dir / "oat_sensitivity_drained_side.png"
-plt.savefig(out, dpi=500)
-print(f"\nSaved {out}")
+# ── Figure descriptions ───────────────────────────────────────────────────────
+lines = ["# OAT-DRAINED sensitivity figures\n",
+         "Drained lateral boundary (P = 0, mechanically free on right). "
+         "E = 5 GPa, ν = 0.40, Kf = 2.2 GPa, μ = 10⁻³ Pa·s. "
+         "H = 1 cm (drainage H/2 = 5 mm), Re = 2.5 cm. "
+         "Load: −10 MPa step at t = 0.\n",
+         "Each figure: 1-column (90 × 60 mm), one panel, 500 dpi.\n"]
+descs = {
+    "phi":   ("oat_drained_phi_p.png / oat_drained_phi_uz.png",
+              "φ sweep: φ ∈ {0.05, 0.10, 0.15, 0.20, 0.25, 0.30}; "
+              "fixed α = 0.75, k = 1×10⁻²⁰ m²."),
+    "alpha": ("oat_drained_alpha_p.png / oat_drained_alpha_uz.png",
+              "α sweep: α ∈ {0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90}; "
+              "fixed φ = 0.10, k = 1×10⁻²⁰ m²."),
+    "perm":  ("oat_drained_perm_p.png / oat_drained_perm_uz.png",
+              "k sweep: k ∈ {10⁻¹⁸, 10⁻¹⁹, 10⁻²⁰, 10⁻²¹, 10⁻²²} m²; "
+              "fixed φ = 0.10, α = 0.75."),
+}
+for sw, (fname, desc) in descs.items():
+    lines.append(f"## {fname}\n{desc}\n")
+(png_dir / "oat_drained_sensitivity.md").write_text("\n".join(lines))
+print(f"Saved {png_dir / 'oat_drained_sensitivity.md'}")

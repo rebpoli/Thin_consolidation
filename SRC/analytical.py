@@ -10,7 +10,7 @@ Reference: Cheng (2016) — Poroelasticity, §3.4.
 
 import numpy as np
 
-from config import CONFIG
+from config import CONFIG, SURFACES
 
 
 # ---------------------------------------------------------------------------
@@ -40,9 +40,22 @@ class Analytical1DConsolidation:
         mu   = self.material_cfg.mu
         S    = self.material_cfg.S
         eta  = self.material_cfg.eta
-        sig0 = -1e5          # reference step load [Pa] — kept internal
+        sig0 = self._applied_sig_zz(0.0)
+        if abs(sig0) < 1e-30:
+            sig0 = -1e5
         self.sig0 = sig0
         self.p0   = -sig0 * eta / mu / S
+
+    def _applied_sig_zz(self, time: float) -> float:
+        """Sum the currently applied sig_zz across all loaded surfaces."""
+        total = 0.0
+        for surface in SURFACES:
+            bc = getattr(CONFIG.boundary_conditions, surface)
+            if bc.periodic_load is not None:
+                total += bc.periodic_load.eval(time)
+            elif bc.sig_zz is not None:
+                total += bc.sig_zz
+        return total
 
     # ------------------------------------------------------------------
     # Public API — one method per quantity, called each FEM timestep

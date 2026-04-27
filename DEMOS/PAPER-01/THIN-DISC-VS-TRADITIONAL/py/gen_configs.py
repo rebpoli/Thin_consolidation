@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate per-case config.yaml files for the THIN-DISC-VS-TRADITIONAL comparison.
 
-Two test protocols, same material, three permeabilities:
+Two test protocols, same material, with permeability and alpha sweeps:
 
   THIN-DISC   — OAT-DRAINED protocol
                 H = 1.0 cm, Re = 2.5 cm
@@ -15,10 +15,11 @@ Reference material (shared):
   E=5 GPa, nu=0.40, alpha=0.75, phi=0.10, Kf=2.2 GPa
 
 Permeabilities: 1e-20, 1e-21, 1e-22 m²
+Alpha values:   0.70, 0.80, 0.90 (at fixed k = 1e-20 m²)
 
 End time: 30 days
 
-Writes one runs/<label>/config.yaml per case (6 total).
+Writes one runs/<label>/config.yaml per case.
 """
 
 import argparse
@@ -59,7 +60,7 @@ _nu    = 0.40
 _visc  = 1.0e-3
 _Kf    = 2.2e9
 _phi   = 0.10
-_alpha = 0.75
+_alpha_base = 0.75
 _mu    = _E / (2 * (1 + _nu))
 _M     = _Kf / _phi           # Biot modulus
 
@@ -75,17 +76,18 @@ _T_END    = 30 * 86400.0   # 30 days [s]
 
 # ── Permeabilities ─────────────────────────────────────────────────────────────
 PERM_VALUES = [1e-20, 1e-21, 1e-22]
+ALPHA_VALUES = [0.70, 0.80, 0.90]
 
 # ── Derived helpers ────────────────────────────────────────────────────────────
-def _storativity():
-    return 1.0 / _M + _alpha**2 * (1 - 2*_nu) / (2 * _mu * (1 - _nu))
+def _storativity(alpha):
+    return 1.0 / _M + alpha**2 * (1 - 2*_nu) / (2 * _mu * (1 - _nu))
 
-def _cv(perm):
-    return perm / (_visc * _storativity())
+def _cv(perm, alpha):
+    return perm / (_visc * _storativity(alpha))
 
-def _end_time_tv(perm, H):
+def _end_time_tv(perm, alpha, H):
     H_dr = H / 2
-    return float(_cv(perm) * _T_END / H_dr**2)
+    return float(_cv(perm, alpha) * _T_END / H_dr**2)
 
 def _fmt_perm(v):
     s = f"{v:.2e}"; m, e = s.split("e")
@@ -101,7 +103,7 @@ def _write_config(path, cfg):
     path.write_text(text)
 
 # ── Config builders ────────────────────────────────────────────────────────────
-def _make_thin_disc(label, perm):
+def _make_thin_disc(label, perm, alpha):
     geo = _THIN
     return {
         "general": {
@@ -114,7 +116,7 @@ def _make_thin_disc(label, perm):
         "materials": {
             "E":     _E,
             "nu":    _nu,
-            "alpha": _alpha,
+            "alpha": float(alpha),
             "perm":  float(perm),
             "visc":  _visc,
             "M":     _M,
@@ -136,7 +138,7 @@ def _make_thin_disc(label, perm):
         },
         "numerical": {
             "theta_cn":    0.75,
-            "end_time_tv": _end_time_tv(perm, geo["H"]),
+            "end_time_tv": _end_time_tv(perm, alpha, geo["H"]),
             "dt_min_s":    0.1,
             "dt_max_s":    3600.0,
             "dt_factor":   1.5,
@@ -147,7 +149,7 @@ def _make_thin_disc(label, perm):
         },
     }
 
-def _make_traditional(label, perm):
+def _make_traditional(label, perm, alpha):
     geo = _TRAD
     return {
         "general": {
@@ -160,7 +162,7 @@ def _make_traditional(label, perm):
         "materials": {
             "E":     _E,
             "nu":    _nu,
-            "alpha": _alpha,
+            "alpha": float(alpha),
             "perm":  float(perm),
             "visc":  _visc,
             "M":     _M,
@@ -181,8 +183,8 @@ def _make_traditional(label, perm):
         },
         "numerical": {
             "theta_cn":    0.75,
-            "end_time_tv": _end_time_tv(perm, geo["H"]),
-            "dt_min_s":    1.0,
+            "end_time_tv": _end_time_tv(perm, alpha, geo["H"]),
+            "dt_min_s":    0.1,
             "dt_max_s":    3600.0,
             "dt_factor":   1.5,
         },
@@ -197,8 +199,17 @@ def _all_cases():
     cases = []
     for perm in PERM_VALUES:
         p = _fmt_perm(perm)
-        cases.append(dict(label=f"thin_disc_{p}", builder=_make_thin_disc, perm=perm))
-        cases.append(dict(label=f"traditional_{p}", builder=_make_traditional, perm=perm))
+        cases.append(dict(label=f"thin_disc_{p}", builder=_make_thin_disc,
+                          perm=perm, alpha=_alpha_base))
+        cases.append(dict(label=f"traditional_{p}", builder=_make_traditional,
+                          perm=perm, alpha=_alpha_base))
+
+    for alpha in ALPHA_VALUES:
+        a = f"{alpha:.2f}"
+        cases.append(dict(label=f"thin_disc_alpha_{a}", builder=_make_thin_disc,
+                          perm=1e-20, alpha=alpha))
+        cases.append(dict(label=f"traditional_alpha_{a}", builder=_make_traditional,
+                          perm=1e-20, alpha=alpha))
     return cases
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -216,7 +227,7 @@ def main():
         print(f"  {'(dry) ' if args.dry_run else ''}writing {cfg_path.relative_to(DEMO_DIR)}")
         if not args.dry_run:
             run_dir.mkdir(parents=True, exist_ok=True)
-            _write_config(cfg_path, case["builder"](case["label"], case["perm"]))
+            _write_config(cfg_path, case["builder"](case["label"], case["perm"], case["alpha"]))
 
     if not args.dry_run:
         print(f"\n{len(cases)} config files written. Run TOOLS/run_sweep.py to execute.")

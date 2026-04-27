@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Aspect-ratio sweep — Traditional Consolidation (laterally drained).
+"""Aspect-ratio sweep — Thin Disc Consolidation (sealed lateral boundary).
 
 Generates one config.yaml per H/Re value.  Load and drainage are at the
-bottom face; the lateral boundary (r=Re) is also drained (Pressure=0).
-This is the "unjacketed" configuration where fluid can escape both axially
-and radially.
+bottom face; the lateral boundary (r=Re) is sealed (U_r=0).  This is the
+"jacketed" configuration where fluid can only escape axially — the 1D
+Terzaghi problem exactly.  Errors should remain low across all aspect ratios.
 
 Each run is sized so the simulation covers T_v = 3 consolidation time
 factors regardless of specimen geometry.  dt_max is set per case so the
@@ -29,21 +29,26 @@ H_OVER_RE_VALUES = [0.01, 0.02, 0.05, 0.10, 0.20, 0.50, 1.00, 2.00, 5.00, 10.00]
 
 Re = 0.025   # fixed radius [m]
 
-# ── Fixed material properties ──────────────────────────────────────────────────
-E     = 1.44e10   # Pa
-nu    = 0.2
-alpha = 0.78
+# ── Fixed material properties (match PAPER-01 base case) ─────────────────────
+E     = 5.0e9     # Pa
+nu    = 0.40
+phi   = 0.10
+alpha = 0.75
 perm  = 1.0e-20   # m²
 visc  = 1.0e-3    # Pa·s
-M     = 1.35e10   # Pa
+Kf    = 2.2e9     # Pa
+M     = Kf / phi  # Pa
 
 # ── Derived consolidation coefficient ─────────────────────────────────────────
 mu = E / (2 * (1 + nu))
 S  = 1.0 / M + alpha**2 * (1 - 2*nu) / (2 * mu * (1 - nu))
 cv = perm / (visc * S)
 
-# ── Timestepping target ────────────────────────────────────────────────────────
-T_V_TARGET = 3.0   # run until Tv=3 (>95% consolidation)
+# ── Load/time controls (match PAPER-01 base case) ─────────────────────────────
+L0      = 0.0
+L1      = -10.0e6
+T_START = 0.0
+T_END   = 36000.0
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description=__doc__,
@@ -57,15 +62,15 @@ def _make_config(label, H_over_Re):
     H    = Re * H_over_Re
     H_dr = H / 2.0
 
-    t_end       = T_V_TARGET * 4.0 * H_dr**2 / cv
-    end_time_tv = T_V_TARGET
-    dt_max_s    = t_end / 100.0
-    dt_min_s    = min(dt_max_s / 1000.0, 0.001)
+    t_end       = T_END
+    end_time_tv = cv * t_end / (H_dr**2)
+    dt_max_s    = 600.0
+    dt_min_s    = 0.001
 
     return f"""\
 general:
-  description: "AR-sweep-drained {label}  (H/Re={H_over_Re:.2f})"
-  tags: "aspect_ratio_sweep drained"
+  description: "AR-sweep-sealed {label}  (H/Re={H_over_Re:.2f})"
+  tags: "aspect_ratio_sweep sealed paper01_base"
   run_dir: "{RUNS_DIR / label}"
   run_id: "{label}"
 
@@ -73,10 +78,10 @@ mesh:
   Re: {Re}
   H: {H:.6g}
   N: 6             # fallback only
-  Nr: 3            # quasi-1D: minimal r-elements
-  Nz: 50           # vertical resolution
+  Nr: 30            # quasi-1D: minimal r-elements
+  Nz: 30           # vertical resolution
   grade_r: false
-  grade_z_bottom: false   # drainage at z=0 (bottom)
+  grade_z_bottom: false
 
 materials:
   E: {E:.4g}
@@ -86,17 +91,23 @@ materials:
   visc: {visc:.4g}
   M: {M:.4g}
 
-# DRAINED LATERAL — fluid escapes at bottom face and at r=Re
+# SEALED LATERAL — matches PAPER-01 OAT-SEALED BC pattern
 boundary_conditions:
-  top:  
-    sig_zz: -1.0e5
+  top:
     Pressure: 0.0
-    U_r: 0.0
+    U_z_rigid: 1
+    periodic_load:
+      L0: {L0}
+      L1: {L1}
+      t_start: {T_START}
+      period: 72000.0
+      duty_cycle: 1.0
+      n_periods: -1
 
   bottom:
     U_z: 0.0
 
-  right:  
+  right:
     U_r: 0.0
 
   left:
@@ -104,7 +115,7 @@ boundary_conditions:
 
 numerical:
   theta_cn: 0.75
-  end_time_tv: {end_time_tv:.4f}   # T_v = c_v·t/(4·H_dr²); t_end = {t_end:.3g} s
+  end_time_tv: {end_time_tv:.6g}   # T_v = c_v·t/(H_dr²); t_end = {t_end:.3g} s
   dt_min_s: {dt_min_s:.4g}
   dt_max_s: {dt_max_s:.4g}
   dt_factor: 1.5
@@ -116,14 +127,14 @@ output:
 
 
 # ── Generate ───────────────────────────────────────────────────────────────────
-print(f"\nAspect-ratio sweep — Traditional Consolidation (laterally drained)")
-print(f"  Re = {Re} m  |  cv = {cv:.3e} m²/s  |  T_v target = {T_V_TARGET}")
+print(f"\nAspect-ratio sweep — Thin Disc Consolidation (sealed lateral)")
+print(f"  Re = {Re} m  |  cv = {cv:.3e} m²/s  |  t_end = {T_END:.0f} s")
 print(f"  {len(H_OVER_RE_VALUES)} cases\n")
 
 for H_over_Re in H_OVER_RE_VALUES:
     H    = Re * H_over_Re
     H_dr = H / 2.0
-    t_end = T_V_TARGET * 4.0 * H_dr**2 / cv
+    t_end = T_END
 
     label = f"ar_{H_over_Re:.2f}"
     print(f"  {label:<12}  H={H:.4g} m  H_dr={H_dr:.4g} m  t_end={t_end:.3g} s")

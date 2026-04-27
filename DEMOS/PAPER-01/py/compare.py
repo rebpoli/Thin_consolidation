@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Compare OAT-SEALED vs OAT-DRAINED lateral boundary conditions.
+"""OAT-SEALED vs OAT-DRAINED — lateral BC comparison (paper style, one figure per sweep).
 
-OAT-SEALED — thick gray solid line  (sealed side: U_r=0 on right)
-OAT-DRAINED — dashed black line     (drained side: P=0 on right, mechanically free)
-
-Three columns: φ sweep | α sweep | k sweep
-Two data rows:  pressure P50 | u_z at bottom
-One load row.
+Outputs:
+    png/compare_phi.png
+    png/compare_alpha.png
+    png/compare_perm.png
+    png/compare_sealed_vs_drained.md
 
 USAGE:
     ./py/compare.py
@@ -15,6 +14,7 @@ USAGE:
 import argparse
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib as mpl
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
@@ -22,46 +22,68 @@ import matplotlib.gridspec as gridspec
 import matplotlib.lines as mlines
 from pathlib import Path
 
-PAPER01_DIR = Path(__file__).resolve().parents[1]   # PAPER-01/
-D13_RUNS    = PAPER01_DIR / "OAT-SEALED" / "runs"
+# ── Paper style ───────────────────────────────────────────────────────────────
+MM = 1 / 25.4
+mpl.rcParams.update({
+    'font.size':         6,   'font.weight':       'normal',
+    'axes.titlesize':    7,   'axes.titleweight':  'normal',
+    'axes.labelsize':    6,   'axes.labelweight':  'normal',
+    'xtick.labelsize':   6,   'ytick.labelsize':   6,
+    'legend.fontsize':   5,   'legend.handlelength': 1.4,
+    'lines.linewidth':   0.8,
+    'axes.linewidth':    0.5,
+    'xtick.major.width': 0.5, 'ytick.major.width': 0.5,
+    'xtick.minor.width': 0.4, 'ytick.minor.width': 0.4,
+    'xtick.major.size':  2.5, 'ytick.major.size':  2.5,
+    'xtick.minor.size':  1.5, 'ytick.minor.size':  1.5,
+    'grid.linewidth':    0.4,
+    'pdf.fonttype': 42,       'ps.fonttype':  42,
+})
+
+PAPER01_DIR = Path(__file__).resolve().parents[1]
+D13_RUNS    = PAPER01_DIR / "OAT-SEALED"  / "runs"
 D14_RUNS    = PAPER01_DIR / "OAT-DRAINED" / "runs"
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Compare OAT-SEALED vs OAT-DRAINED")
-parser.add_argument("--min-time", type=float, default=0.0,
-                    help="Minimum time to plot [s] (default: 0)")
-parser.add_argument("--max-time", type=float, default=20000.0,
-                    help="Maximum time to plot [s] (default: 20000)")
-args = parser.parse_args()
+parser = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("--min-time", type=float, default=0.0)
+parser.add_argument("--max-time", type=float, default=20000.0)
+args     = parser.parse_args()
 min_time = args.min_time
 max_time = args.max_time
 
-# ── Sweep definitions (must match run_all.py in both demos) ───────────────────
+# ── Sweep definitions ─────────────────────────────────────────────────────────
 PHI_VALUES   = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
-ALPHA_VALUES = [0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
-PERM_VALUES  = [1e-21, 1e-20, 1e-19, 1e-18, 1e-17, 1e-16]
+ALPHA_VALUES = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90]
+PERM_VALUES  = [1e-18, 1e-19, 1e-20, 1e-21, 1e-22]
 
 def _fmt_perm(v):
     s = f"{v:.2e}"; m, e = s.split("e")
     return f"{m.rstrip('0').rstrip('.')}e{int(e)}"
 
 SWEEPS = {
-    "phi":   {"labels": [f"phi_{v:.2f}"          for v in PHI_VALUES],
-              "title":  "$\\phi$ sweep  ($\\alpha=0.50$, $k=10^{-20}$ m²)"},
-    "alpha": {"labels": [f"alpha_{v:.2f}"         for v in ALPHA_VALUES],
-              "title":  "$\\alpha$ sweep  ($\\phi=0.10$, $k=10^{-20}$ m²)"},
-    "perm":  {"labels": [f"perm_{_fmt_perm(v)}"   for v in PERM_VALUES],
-              "title":  "$k$ sweep  ($\\phi=0.10$, $\\alpha=0.50$)"},
+    "phi":   {"labels": [f"phi_{v:.2f}"        for v in PHI_VALUES],
+              "title":  "$\\phi$ sweep",
+              "fname":  "compare_phi.png"},
+    "alpha": {"labels": [f"alpha_{v:.2f}"       for v in ALPHA_VALUES],
+              "title":  "$\\alpha$ sweep",
+              "fname":  "compare_alpha.png"},
+    "perm":  {"labels": [f"perm_{_fmt_perm(v)}" for v in PERM_VALUES],
+              "title":  "$k$ sweep",
+              "fname":  "compare_perm.png"},
 }
 SWEEP_ORDER = ["phi", "alpha", "perm"]
-N_COLS = 3
 
-# ── Styles ────────────────────────────────────────────────────────────────────
-D13_KW = dict(color="gray",  lw=2.5, ls="-",  zorder=2, alpha=0.85)
-D14_KW = dict(color="black", lw=1.5, ls="--", zorder=3)
+D13_KW = dict(color="gray",  lw=1.2, ls="-",  zorder=2, alpha=0.85)
+D14_KW = dict(color="black", lw=0.8, ls="--", zorder=3)
+
+LEG_HANDLES = [
+    mlines.Line2D([], [], color="gray",  lw=1.2, ls="-",  label="Sealed ($U_r=0$)"),
+    mlines.Line2D([], [], color="black", lw=0.8, ls="--", label="Drained ($P=0$)"),
+]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
 def _load(runs_dir, label):
     nc = runs_dir / label / "outputs" / "fem_timeseries.nc"
     if nc.exists():
@@ -71,139 +93,110 @@ def _load(runs_dir, label):
             print(f"  Warning: {label}: {e}")
     return None
 
-
 def _mask(ds):
-    t  = ds["time"].values
+    t = ds["time"].values
     mk = np.ones(len(t), bool)
     if min_time is not None: mk &= (t >= min_time)
     if max_time is not None: mk &= (t <= max_time)
     return t, mk
 
-
 def _plot_pressure(ax, ds, **kw):
-    if ds is None:
-        return
+    if ds is None: return
     t, mk = _mask(ds)
-    t = t[mk] / 60.0; pos = t >= 0   # s → min
+    t_min = t[mk] / 60.0
+    pos = t_min > 0
     if "pressure_mean" in ds:
         p = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
     elif "pressure_at_base" in ds:
         p = np.clip(ds["pressure_at_base"].values[mk][pos] / 1e3, 1e-1, None)
     else:
         return
-    ax.plot(t[pos], p, **kw)
-
+    ax.plot(t_min[pos], p, **kw)
 
 def _plot_uz(ax, ds, **kw):
-    if ds is None or "uz_at_top" not in ds:
-        return
+    if ds is None or "uz_at_top" not in ds: return
     t, mk = _mask(ds)
-    t = t[mk] / 60.0; pos = t >= 0   # s → min
-    uz = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
-    ax.plot(t[pos], uz, **kw)
+    t_min = t[mk] / 60.0
+    pos = t_min > 0
+    uz = ds["uz_at_top"].values[mk][pos] * 2e6
+    ax.plot(t_min[pos], uz, **kw)
 
-
-def _draw_load(ax, ds):
-    if ds is None or "sig_zz_applied" not in ds:
-        return
-    t, mk = _mask(ds)
-    t = t[mk] / 60.0; sig = ds["sig_zz_applied"].values[mk] / 1e6   # s → min
-    pos = t >= 0
-    ax.step(t[pos], sig[pos], color="crimson", lw=1.0, where="post", zorder=2)
-    ax.fill_between(t[pos], sig[pos], step="post", color="crimson", alpha=0.15, zorder=1)
+def _fmt_xaxis(ax):
     ax.set_xscale("log")
-    ax.set_ylabel("$\\sigma_{zz}$ [MPa]", fontsize=7, labelpad=2)
-    ax.set_xlabel("Time [min]", fontsize=8)
-    ax.tick_params(which="both", labelsize=7)
     ax.xaxis.set_major_locator(plt.LogLocator(base=10, subs=[1, 2, 5]))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:g}"))
     ax.xaxis.set_minor_locator(plt.NullLocator())
-    ax.grid(True, which="both", alpha=0.25, zorder=0)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(3))
+    ax.set_xlabel("Time [min]")
 
+# ── One figure per sweep ──────────────────────────────────────────────────────
+png_dir = PAPER01_DIR / "png"
+png_dir.mkdir(exist_ok=True)
 
-# ── Figure layout ─────────────────────────────────────────────────────────────
-fig = plt.figure(figsize=(15, 9))
-gs  = gridspec.GridSpec(3, N_COLS, figure=fig,
-                        height_ratios=[4, 3, 1],
-                        hspace=0.10, wspace=0.30,
-                        top=0.91, bottom=0.07,
-                        left=0.07, right=0.97)
+for sw in SWEEP_ORDER:
+    spec = SWEEPS[sw]
+    loaded_any = False
 
-ax_p    = [fig.add_subplot(gs[0, c]) for c in range(N_COLS)]
-ax_uz   = [fig.add_subplot(gs[1, c]) for c in range(N_COLS)]
-ax_load = [fig.add_subplot(gs[2, c]) for c in range(N_COLS)]
-
-for c in range(N_COLS):
-    ax_uz[c].sharex(ax_p[c])
-    ax_load[c].sharex(ax_p[c])
-
-# ── Draw ──────────────────────────────────────────────────────────────────────
-loaded_any = False
-
-for c, sw in enumerate(SWEEP_ORDER):
-    spec      = SWEEPS[sw]
-    first_ds  = None
+    fig = plt.figure(figsize=(90*MM, 120*MM))
+    gs  = gridspec.GridSpec(2, 1, figure=fig,
+                            height_ratios=[1.2, 1],
+                            hspace=0.30,
+                            top=0.90, bottom=0.13,
+                            left=0.20, right=0.97)
+    ax_p  = fig.add_subplot(gs[0])
+    ax_uz = fig.add_subplot(gs[1])
 
     for label in spec["labels"]:
         d13 = _load(D13_RUNS, label)
         d14 = _load(D14_RUNS, label)
-
         if d13 is not None:
             loaded_any = True
-            if first_ds is None:
-                first_ds = d13
-
-        _plot_pressure(ax_p[c],  d13, **D13_KW)
-        _plot_pressure(ax_p[c],  d14, **D14_KW)
-        _plot_uz(ax_uz[c],       d13, **D13_KW)
-        _plot_uz(ax_uz[c],       d14, **D14_KW)
+        _plot_pressure(ax_p,  d13, **D13_KW)
+        _plot_pressure(ax_p,  d14, **D14_KW)
+        _plot_uz(ax_uz,       d13, **D13_KW)
+        _plot_uz(ax_uz,       d14, **D14_KW)
 
     if not loaded_any:
-        raise FileNotFoundError(
-            f"No output files found under {D13_RUNS} or {D14_RUNS}. "
-            "Run run_all.py in both demos first.")
+        print(f"  Warning: no data for {sw} sweep — skipping")
+        plt.close(fig)
+        continue
 
-    # Pressure axis — log-log
-    ax_p[c].set_yscale("log")
-    ax_p[c].set_xscale("log")
-    ax_p[c].set_ylim(bottom=1e-1)
-    ax_p[c].set_ylabel("Pressure [kPa]", fontsize=8)
-    ax_p[c].tick_params(which="both", labelsize=7)
-    plt.setp(ax_p[c].get_xticklabels(which="both"), visible=False)
-    ax_p[c].grid(True, which="both", alpha=0.25, zorder=0)
-    ax_p[c].set_title(spec["title"], fontsize=9, pad=4)
+    # Pressure
+    ax_p.set_yscale("log")
+    ax_p.set_ylim(bottom=1e-1)
+    ax_p.set_ylabel("$P$ [kPa]")
+    ax_p.grid(True, which="both", alpha=0.25, zorder=0)
+    ax_p.set_title(spec["title"], pad=3)
+    ax_p.legend(handles=LEG_HANDLES, loc="upper right", framealpha=0.85,
+                labelspacing=0.2, borderpad=0.4, handletextpad=0.4)
+    _fmt_xaxis(ax_p)
 
-    # uz axis — log time
-    ax_uz[c].set_xscale("log")
-    ax_uz[c].set_ylabel("$u_z$ (total displacement) [μm]", fontsize=8)
-    ax_uz[c].tick_params(which="both", labelsize=7)
-    plt.setp(ax_uz[c].get_xticklabels(which="both"), visible=False)
-    ax_uz[c].grid(True, which="both", alpha=0.25, zorder=0)
+    # uz
+    ax_uz.set_ylabel("$u_z$ [μm]")
+    ax_uz.grid(True, which="both", alpha=0.25, zorder=0)
+    _fmt_xaxis(ax_uz)
 
-    _draw_load(ax_load[c], first_ds)
+    out = png_dir / spec["fname"]
+    fig.savefig(out, dpi=500)
+    plt.close(fig)
+    print(f"Saved {out}")
 
-# ── Shared legend ─────────────────────────────────────────────────────────────
-leg_handles = [
-    mlines.Line2D([], [], color="gray",  lw=2.5, ls="-",
-                  label="OAT-SEALED — sealed  (right: U_r=0)"),
-    mlines.Line2D([], [], color="black", lw=1.5, ls="--",
-                  label="OAT-DRAINED — drained side  (right: P=0, free)"),
-]
-ax_p[0].legend(handles=leg_handles, fontsize=7, loc="upper right",
-               framealpha=0.85, handlelength=2.2)
-
-# ── Suptitle ──────────────────────────────────────────────────────────────────
-fig.suptitle(
-    "OAT-SEALED vs OAT-DRAINED — Sealed vs Drained Lateral Boundary  |  "
-    "E=10 GPa, ν=0.35, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
-    "H=1.0 cm (H/2=0.5 cm drainage path), Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
-    "base: φ=0.10, α=0.50, k=1e-20 m²  |  each family: all sweep values overlaid",
-    fontsize=9)
-
-# ── Save ──────────────────────────────────────────────────────────────────────
-png_dir = PAPER01_DIR / "png"
-png_dir.mkdir(exist_ok=True)
-out = png_dir / "compare_sealed_vs_drained.png"
-plt.savefig(out, dpi=500)
-print(f"\nSaved {out}")
+# ── Figure descriptions ───────────────────────────────────────────────────────
+lines = ["# Sealed vs Drained comparison figures\n",
+         "OAT sweeps comparing sealed (U_r = 0) vs drained (P = 0, free) "
+         "lateral boundary conditions. All sweep curves overlaid per figure.\n"
+         "E = 5 GPa, ν = 0.40, Kf = 2.2 GPa, μ = 10⁻³ Pa·s. "
+         "H = 1 cm, Re = 2.5 cm. Load: −10 MPa step at t = 0.\n",
+         "Each figure: 1-column (90 × 120 mm), two rows — P [kPa] (log–log) and u_z [μm].\n",
+         "Gray solid — sealed (OAT-SEALED). Black dashed — drained (OAT-DRAINED).\n"]
+descs = {
+    "phi":   ("compare_phi.png",
+              "φ sweep: φ ∈ {0.05 … 0.30}; fixed α = 0.75, k = 1×10⁻²⁰ m²."),
+    "alpha": ("compare_alpha.png",
+              "α sweep: α ∈ {0.50 … 0.90}; fixed φ = 0.10, k = 1×10⁻²⁰ m²."),
+    "perm":  ("compare_perm.png",
+              "k sweep: k ∈ {10⁻¹⁸ … 10⁻²²} m²; fixed φ = 0.10, α = 0.75."),
+}
+for sw, (fname, desc) in descs.items():
+    lines.append(f"## {fname}\n{desc}\n")
+(png_dir / "compare_sealed_vs_drained.md").write_text("\n".join(lines))
+print(f"Saved {png_dir / 'compare_sealed_vs_drained.md'}")

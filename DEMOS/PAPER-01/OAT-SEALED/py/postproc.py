@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""OAT-SEALED — sensitivity plot.
+"""OAT-SEALED — sensitivity plots (paper style, one 90×60mm PNG per panel).
 
-Three columns, one per sweep (phi | alpha | perm).
-Rows: pressure (log y) | uz | load track.
+Outputs per sweep (phi / alpha / perm):
+    png/oat_sealed_{sw}_p.png    — pore pressure
+    png/oat_sealed_{sw}_uz.png   — axial displacement
+    png/oat_sealed_sensitivity.md
 
 USAGE:
     ./py/postproc.py
@@ -11,27 +13,44 @@ USAGE:
 import argparse
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib as mpl
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import matplotlib.cm as cm
 from pathlib import Path
 
-DEMO_DIR = Path(__file__).resolve().parents[1]   # OAT-SEALED/
+MM = 1 / 25.4
+FIG_W_MM = 90
+FIG_H_MM = 60
+mpl.rcParams.update({
+    'font.size':         6,   'font.weight':       'normal',
+    'axes.titlesize':    7,   'axes.titleweight':  'normal',
+    'axes.labelsize':    6,   'axes.labelweight':  'normal',
+    'xtick.labelsize':   6,   'ytick.labelsize':   6,
+    'legend.fontsize':   5,   'legend.handlelength': 1.0,
+    'lines.linewidth':   0.8,
+    'axes.linewidth':    0.5,
+    'xtick.major.width': 0.5, 'ytick.major.width': 0.5,
+    'xtick.minor.width': 0.4, 'ytick.minor.width': 0.4,
+    'xtick.major.size':  2.5, 'ytick.major.size':  2.5,
+    'xtick.minor.size':  1.5, 'ytick.minor.size':  1.5,
+    'grid.linewidth':    0.4,
+    'pdf.fonttype': 42,       'ps.fonttype':  42,
+})
+
+DEMO_DIR = Path(__file__).resolve().parents[1]
 RUNS_DIR = DEMO_DIR / "runs"
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Demo 13 OAT sensitivity plot")
-parser.add_argument("--min-time", type=float, default=0.0,
-                    help="Minimum time to plot [s] (default: 0)")
-parser.add_argument("--max-time", type=float, default=20000.0,
-                    help="Maximum time to plot [s] (default: 20000)")
-args = parser.parse_args()
+parser = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("--min-time", type=float, default=0.0)
+parser.add_argument("--max-time", type=float, default=20000.0)
+args     = parser.parse_args()
 min_time = args.min_time
 max_time = args.max_time
+XMIN_S   = 1e-2
 
-# ── Sweep definitions (must match run_all.py) ─────────────────────────────────
 PHI_VALUES   = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
 ALPHA_VALUES = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90]
 PERM_VALUES  = [1e-18, 1e-19, 1e-20, 1e-21, 1e-22]
@@ -41,23 +60,36 @@ def _fmt_perm(v):
     return f"{m.rstrip('0').rstrip('.')}e{int(e)}"
 
 SWEEPS = {
-    "phi":   {"labels": [f"phi_{v:.2f}"   for v in PHI_VALUES],
+    "phi":   {"labels": [f"phi_{v:.2f}"        for v in PHI_VALUES],
               "values": PHI_VALUES,
-              "fmt":    lambda v: f"$\\phi={v*100:.0f}$%",
-              "title":  "$\\phi$ sweep  ($\\alpha=0.75$, $k=10^{-20}$ m²)"},
-    "alpha": {"labels": [f"alpha_{v:.2f}" for v in ALPHA_VALUES],
+              "fmt":    lambda v: f"$\\phi={v*100:.0f}\\%$",
+              "ncol":   2},
+    "alpha": {"labels": [f"alpha_{v:.2f}"       for v in ALPHA_VALUES],
               "values": ALPHA_VALUES,
               "fmt":    lambda v: f"$\\alpha={v:.2f}$",
-              "title":  "$\\alpha$ sweep  ($\\phi=0.10$, $k=10^{-20}$ m²)"},
+              "ncol":   2},
     "perm":  {"labels": [f"perm_{_fmt_perm(v)}" for v in PERM_VALUES],
               "values": PERM_VALUES,
-              "fmt":    lambda v: f"$k={_fmt_perm(v)}$ m²",
-              "title":  "$k$ sweep  ($\\phi=0.10$, $\\alpha=0.75$)"},
+              "fmt":    lambda v: f"$k={_fmt_perm(v)}$ (m$^2$)",
+              "ncol":   1},
 }
-SWEEP_ORDER = ["phi", "alpha", "perm"]
-N_COLS = 3
+PALETTES = {
+    "phi":   cm.Blues(np.linspace(0.35, 0.95, len(PHI_VALUES))),
+    "alpha": cm.Oranges(np.linspace(0.35, 0.95, len(ALPHA_VALUES))),
+    "perm":  cm.Purples(np.linspace(0.35, 0.95, len(PERM_VALUES))),
+}
 
-# ── Load datasets ─────────────────────────────────────────────────────────────
+LEGEND_STYLE = dict(
+    framealpha=1.0,
+    fancybox=False,
+    edgecolor="black",
+    facecolor="white",
+    labelspacing=0.15,
+    borderpad=0.3,
+    handletextpad=0.3,
+    columnspacing=0.5,
+)
+
 data = {sw: {} for sw in SWEEPS}
 for sw, spec in SWEEPS.items():
     for label in spec["labels"]:
@@ -67,149 +99,113 @@ for sw, spec in SWEEPS.items():
                 data[sw][label] = xr.open_dataset(nc)
             except Exception as e:
                 print(f"  Warning: {label}: {e}")
-
 for sw, spec in SWEEPS.items():
-    n = len(data[sw])
-    print(f"{sw} sweep: {n}/{len(spec['labels'])} cases available")
+    print(f"{sw}: {len(data[sw])}/{len(spec['labels'])} cases")
+if sum(len(v) for v in data.values()) == 0:
+    raise FileNotFoundError(f"No outputs under {RUNS_DIR}. Run make run first.")
 
-total = sum(len(v) for v in data.values())
-if total == 0:
-    raise FileNotFoundError(f"No output files found under {RUNS_DIR}. Run run_all.py first.")
-
-# ── Figure layout ─────────────────────────────────────────────────────────────
-# 3 cols × 3 rows: pressure (log) | uz | load
-fig = plt.figure(figsize=(15, 9))
-gs  = gridspec.GridSpec(3, N_COLS, figure=fig,
-                        height_ratios=[4, 3, 1],
-                        hspace=0.10, wspace=0.30,
-                        top=0.91, bottom=0.07,
-                        left=0.07, right=0.97)
-
-ax_p    = [fig.add_subplot(gs[0, c]) for c in range(N_COLS)]
-ax_uz   = [fig.add_subplot(gs[1, c]) for c in range(N_COLS)]
-ax_load = [fig.add_subplot(gs[2, c]) for c in range(N_COLS)]
-
-# Share x within each column
-for c in range(N_COLS):
-    ax_uz[c].sharex(ax_p[c])
-    ax_load[c].sharex(ax_p[c])
-
-# ── Color palettes ────────────────────────────────────────────────────────────
-PALETTES = {
-    "phi":   cm.Blues(np.linspace(0.35, 0.95, len(PHI_VALUES))),
-    "alpha": cm.Oranges(np.linspace(0.35, 0.95, len(ALPHA_VALUES))),
-    "perm":  cm.Purples(np.linspace(0.35, 0.95, len(PERM_VALUES))),
-}
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _mask(ds, min_time, max_time):
-    t  = ds["time"].values
+def _mask(ds):
+    t = ds["time"].values
     mk = np.ones(len(t), bool)
-    if min_time is not None:
-        mk &= (t >= min_time)
-    if max_time is not None:
-        mk &= (t <= max_time)
+    if max_time is not None: mk &= (t <= max_time)
     return t, mk
 
+def _new_fig():
+    fig, ax = plt.subplots(figsize=(FIG_W_MM * MM, FIG_H_MM * MM))
+    return fig, ax
 
-def _plot_pressure(ax, ds, color, label, max_time=None):
-    if ds is None:
-        return
-    t, mk = _mask(ds, min_time, max_time)
-    t = t[mk] / 60.0   # s → min
-    pos = t >= 0
-    if "pressure_mean" in ds and "pressure_p10" in ds and "pressure_p90" in ds:
-        p_mean = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
-        p_p10  = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-1, None)
-        p_p90  = np.clip(ds["pressure_p90"].values[mk][pos]  / 1e3, 1e-1, None)
-        ax.plot(t[pos], p_mean, color=color, linewidth=1.5, label=label, zorder=3)
-        ax.fill_between(t[pos], p_p10, p_p90, color=color, alpha=0.20, linewidth=0, zorder=2)
-    elif "pressure_at_base" in ds:
-        p = np.clip(ds["pressure_at_base"].values[mk][pos] / 1e3, 1e-1, None)
-        ax.plot(t[pos], p, color=color, linewidth=1.5, linestyle="--", label=label, zorder=3)
-
-
-def _plot_uz(ax, ds, color, label, max_time=None):
-    if ds is None or "uz_at_top" not in ds:
-        return
-    t, mk = _mask(ds, min_time, max_time)
-    t_plot = t[mk] / 60.0   # s → min
-    pos = t_plot >= 0
-    uz  = ds["uz_at_top"].values[mk][pos] * 2e6   # m → μm, ×2 for full specimen
-    ax.plot(t_plot[pos], uz, color=color, linewidth=1.5, label=label, zorder=3)
-
-
-def _draw_load(ax, ds, max_time=None):
-    if ds is None or "sig_zz_applied" not in ds:
-        return
-    t, mk = _mask(ds, min_time, max_time)
-    t_plot = t[mk] / 60.0   # s → min
-    sig    = ds["sig_zz_applied"].values[mk] / 1e6
-    pos = t_plot >= 0
-    ax.step(t_plot[pos], sig[pos], color="crimson", linewidth=1.0, where="post", zorder=2)
-    ax.fill_between(t_plot[pos], sig[pos], step="post", color="crimson", alpha=0.15, zorder=1)
+def _fmt_xaxis(ax):
     ax.set_xscale("log")
-    ax.set_ylabel("$\\sigma_{zz}$ [MPa]", fontsize=7, labelpad=2)
-    ax.set_xlabel("Time [min]", fontsize=8)
-    ax.tick_params(which="both", labelsize=7)
-    ax.xaxis.set_major_locator(plt.LogLocator(base=10, subs=[1, 2, 5]))
+    ax.xaxis.set_major_locator(plt.LogLocator(base=10, subs=[1]))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:g}"))
     ax.xaxis.set_minor_locator(plt.NullLocator())
-    ax.grid(True, which="both", alpha=0.25, zorder=0)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(3))
+    ax.set_xlim(XMIN_S, max_time)
+    ax.margins(x=0)
+    ax.set_xlabel("Time (s)")
 
+def _save(fig, path):
+    fig.savefig(path, dpi=500, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"Saved {path}")
 
-# ── Draw ──────────────────────────────────────────────────────────────────────
-
-for c, sw in enumerate(SWEEP_ORDER):
-    spec    = SWEEPS[sw]
-    palette = PALETTES[sw]
-
-    for i, (label, val) in enumerate(zip(spec["labels"], spec["values"])):
-        ds    = data[sw].get(label)
-        color = palette[i]
-        fmt   = spec["fmt"](val)
-        _plot_pressure(ax_p[c],  ds, color, fmt, max_time=max_time)
-        _plot_uz(ax_uz[c],       ds, color, fmt, max_time=max_time)
-
-    # Pressure axis — log-log
-    ax_p[c].set_yscale("log")
-    ax_p[c].set_xscale("log")
-    ax_p[c].set_ylim(bottom=1e-1)
-    ax_p[c].set_ylabel("Pressure [kPa]", fontsize=8)
-    ax_p[c].tick_params(which="both", labelsize=7)
-    plt.setp(ax_p[c].get_xticklabels(which="both"), visible=False)
-    ax_p[c].grid(True, which="both", alpha=0.25, zorder=0)
-    ax_p[c].set_title(spec["title"], fontsize=9, pad=4)
-    ax_p[c].legend(fontsize=6, loc="upper right", framealpha=0.7,
-                   ncol=1, handlelength=1.2, labelspacing=0.3)
-
-    # uz axis — log time
-    ax_uz[c].set_xscale("log")
-    ax_uz[c].set_ylabel("$u_z$ (total displacement) [μm]", fontsize=8)
-    ax_uz[c].tick_params(which="both", labelsize=7)
-    plt.setp(ax_uz[c].get_xticklabels(which="both"), visible=False)
-    ax_uz[c].grid(True, which="both", alpha=0.25, zorder=0)
-    if c == 0:
-        ax_uz[c].legend(fontsize=6, loc="lower right", framealpha=0.7,
-                        ncol=1, handlelength=1.2, labelspacing=0.3)
-
-    # Load track
-    first_ds = next(iter(data[sw].values()), None)
-    _draw_load(ax_load[c], first_ds, max_time=max_time)
-
-# ── Suptitle ──────────────────────────────────────────────────────────────────
-fig.suptitle(
-    "OAT-SEALED — Sensitivity  |  "
-    "E=5 GPa, ν=0.40, M=Kf/φ (Kf=2.2 GPa), μ_fluid=1e-3 Pa·s\n"
-    "H=1.0 cm (H/2=0.5 cm drainage path), Re=2.5 cm  |  Load: −10 MPa step at t=50 s  |  "
-    "base: φ=0.10, α=0.75, k=1e-20 m²",
-    fontsize=9)
-
-# ── Save ──────────────────────────────────────────────────────────────────────
 png_dir = DEMO_DIR / "png"
 png_dir.mkdir(exist_ok=True)
-out = png_dir / "oat_sealed_sensitivity.png"
-plt.savefig(out, dpi=500)
-print(f"\nSaved {out}")
+
+for sw, spec in SWEEPS.items():
+    palette = PALETTES[sw]
+    ncol    = spec["ncol"]
+
+    # ── Pressure figure ───────────────────────────────────────────────────────
+    fig_p, ax_p = _new_fig()
+    for i, (label, val) in enumerate(zip(spec["labels"], spec["values"])):
+        ds = data[sw].get(label)
+        if ds is None:
+            continue
+        t, mk = _mask(ds)
+        t_s = t[mk]
+        pos = t_s > 0
+        if not np.any(pos):
+            continue
+        color = palette[i]
+        lbl   = spec["fmt"](val)
+        if "pressure_mean" in ds and "pressure_p10" in ds and "pressure_p90" in ds:
+            pm   = np.clip(ds["pressure_mean"].values[mk][pos] / 1e3, 1e-1, None)
+            pp10 = np.clip(ds["pressure_p10"].values[mk][pos]  / 1e3, 1e-1, None)
+            pp90 = np.clip(ds["pressure_p90"].values[mk][pos]  / 1e3, 1e-1, None)
+            ax_p.plot(t_s[pos], pm, color=color, label=lbl, zorder=3)
+            ax_p.fill_between(t_s[pos], pp10, pp90, color=color,
+                              alpha=0.15, linewidth=0, zorder=2)
+        elif "pressure_at_base" in ds:
+            p = np.clip(ds["pressure_at_base"].values[mk][pos] / 1e3, 1e-1, None)
+            ax_p.plot(t_s[pos], p, color=color, linestyle="--", label=lbl, zorder=3)
+    ax_p.set_yscale("log")
+    ax_p.set_ylim(bottom=1e-1)
+    ax_p.set_ylabel("$P$ (kPa)")
+    ax_p.grid(True, which="both", alpha=0.25, zorder=0)
+    p_legend_loc = "lower left" if sw in {"perm", "alpha"} else "upper right"
+    leg_p = ax_p.legend(loc=p_legend_loc, ncol=ncol, **LEGEND_STYLE)
+    leg_p.get_frame().set_linewidth(0.3)
+    _fmt_xaxis(ax_p)
+    _save(fig_p, png_dir / f"oat_sealed_{sw}_p.png")
+
+    # ── uz figure ─────────────────────────────────────────────────────────────
+    fig_u, ax_u = _new_fig()
+    for i, (label, val) in enumerate(zip(spec["labels"], spec["values"])):
+        ds = data[sw].get(label)
+        if ds is None or "uz_at_top" not in ds:
+            continue
+        t, mk = _mask(ds)
+        t_s = t[mk]
+        pos = t_s > 0
+        if not np.any(pos):
+            continue
+        uz = ds["uz_at_top"].values[mk][pos] * 2e6
+        ax_u.plot(t_s[pos], uz, color=palette[i],
+                  label=spec["fmt"](val), zorder=3)
+    ax_u.set_ylabel("$u_z$ (μm)")
+    ax_u.grid(True, which="both", alpha=0.25, zorder=0)
+    leg_u = ax_u.legend(loc="best", ncol=ncol, **LEGEND_STYLE)
+    leg_u.get_frame().set_linewidth(0.3)
+    _fmt_xaxis(ax_u)
+    _save(fig_u, png_dir / f"oat_sealed_{sw}_uz.png")
+
+# ── MD ────────────────────────────────────────────────────────────────────────
+md = png_dir / "oat_sealed_sensitivity.md"
+md.write_text("""\
+# OAT-SEALED sensitivity figures
+
+Sealed lateral boundary (U_r = 0). E = 5 GPa, ν = 0.40, Kf = 2.2 GPa,
+μ = 10⁻³ Pa·s. H = 1 cm (drainage path 5 mm), Re = 2.5 cm. Load: −10 MPa at t = 0.
+Each figure: 1-column, 90 × 60 mm, 500 dpi.
+
+## oat_sealed_phi_p.png / oat_sealed_phi_uz.png
+φ sweep: φ ∈ {0.05, 0.10, 0.15, 0.20, 0.25, 0.30}; fixed α = 0.75, k = 10⁻²⁰ m².
+Pressure dissipation (log–log) and total axial displacement u_z [μm].
+
+## oat_sealed_alpha_p.png / oat_sealed_alpha_uz.png
+α sweep: α ∈ {0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90}; fixed φ = 0.10, k = 10⁻²⁰ m².
+
+## oat_sealed_perm_p.png / oat_sealed_perm_uz.png
+k sweep: k ∈ {10⁻¹⁸, 10⁻¹⁹, 10⁻²⁰, 10⁻²¹, 10⁻²²} m²; fixed φ = 0.10, α = 0.75.
+""")
+print(f"Saved {md}")
