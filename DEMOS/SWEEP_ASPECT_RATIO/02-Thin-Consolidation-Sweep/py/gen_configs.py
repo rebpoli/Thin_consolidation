@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Aspect-ratio sweep — Traditional Consolidation (laterally drained).
+"""Aspect-ratio × Poisson sweep — Traditional Consolidation (laterally drained).
 
-Generates one config.yaml per H/Re value.  Load and drainage are at the
+Generates one config.yaml per (H/Re, nu) pair.  Load and drainage are at the
 bottom face; the lateral boundary (r=Re) is also drained (Pressure=0).
 This is the "unjacketed" configuration where fluid can escape both axially
 and radially.
 
-Each run is sized so the simulation covers T_v = 3 consolidation time
-factors regardless of specimen geometry.  dt_max is set per case so the
-adaptive stepper takes at least ~100 steps.
+Each run is sized so the simulation covers T_v = c_v·t_end/H_dr² consolidation
+time factors.  Because c_v depends on nu, end_time_tv is recomputed per case.
 
-Sweep: 10 logarithmically spaced H/Re values from 0.01 to 10.
-Labels:  ar_0.01, ar_0.02, …, ar_10.00   (ar = H/Re)
+Sweep:
+  H/Re : 10 values  (0.01 … 10)
+  nu   :  4 values  (0.1, 0.2, 0.3, 0.4)
+Labels:  ar_<H/Re>__nu_<nu>     e.g. ar_0.50__nu_0.30
 
 USAGE:
     python py/gen_configs.py
@@ -25,13 +26,15 @@ DEMO_DIR = Path(__file__).resolve().parents[1]
 RUNS_DIR = DEMO_DIR / "runs"
 
 # ── Sweep definition ───────────────────────────────────────────────────────────
-H_OVER_RE_VALUES = [0.01, 0.02, 0.05, 0.10, 0.20, 0.50, 1.00, 2.00, 5.00, 10.00]
+# 30 log-spaced cases with AR ∈ [2, 50]; AR = 2/(H/Re)  →  H/Re = 2/AR
+_AR_VALUES       = np.logspace(np.log10(2.0), np.log10(50.0), 30)
+H_OVER_RE_VALUES = [round(2.0 / ar, 4) for ar in _AR_VALUES]
+NU_VALUES        = [0.1, 0.2, 0.3, 0.4]
 
 Re = 0.025   # fixed radius [m]
 
 # ── Fixed material properties (match PAPER-01 base case) ─────────────────────
 E     = 5.0e9     # Pa
-nu    = 0.40
 phi   = 0.10
 alpha = 0.75
 perm  = 1.0e-20   # m²
@@ -39,16 +42,22 @@ visc  = 1.0e-3    # Pa·s
 Kf    = 2.2e9     # Pa
 M     = Kf / phi  # Pa
 
-# ── Derived consolidation coefficient ─────────────────────────────────────────
-mu = E / (2 * (1 + nu))
-S  = 1.0 / M + alpha**2 * (1 - 2*nu) / (2 * mu * (1 - nu))
-cv = perm / (visc * S)
-
 # ── Load/time controls (match PAPER-01 base case) ─────────────────────────────
 L0      = 0.0
 L1      = -10.0e6
 T_START = 0.0
 T_END   = 36000.0
+
+
+def _cv(nu):
+    mu = E / (2 * (1 + nu))
+    S  = 1.0 / M + alpha**2 * (1 - 2*nu) / (2 * mu * (1 - nu))
+    return perm / (visc * S)
+
+
+def _label(H_over_Re, nu):
+    return f"ar_{H_over_Re:.4f}__nu_{nu:.2f}"
+
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description=__doc__,
@@ -58,10 +67,11 @@ parser.add_argument("--dry-run", action="store_true",
 args = parser.parse_args()
 
 
-def _make_config(label, H_over_Re):
+def _make_config(label, H_over_Re, nu):
     H    = Re * H_over_Re
     H_dr = H / 2.0
 
+    cv          = _cv(nu)
     t_end       = T_END
     end_time_tv = cv * t_end / (H_dr**2)
     dt_max_s    = 600.0
@@ -69,8 +79,8 @@ def _make_config(label, H_over_Re):
 
     return f"""\
 general:
-  description: "AR-sweep-drained {label}  (H/Re={H_over_Re:.2f})"
-  tags: "aspect_ratio_sweep drained paper01_base"
+  description: "AR-sweep-drained {label}  (H/Re={H_over_Re:.2f}, nu={nu:.2f})"
+  tags: "aspect_ratio_sweep poisson_sweep drained paper01_base"
   run_dir: "{RUNS_DIR / label}"
   run_id: "{label}"
 
@@ -128,26 +138,27 @@ output:
 
 
 # ── Generate ───────────────────────────────────────────────────────────────────
-print(f"\nAspect-ratio sweep — Traditional Consolidation (laterally drained)")
-print(f"  Re = {Re} m  |  cv = {cv:.3e} m²/s  |  t_end = {T_END:.0f} s")
-print(f"  {len(H_OVER_RE_VALUES)} cases\n")
+n_cases = len(H_OVER_RE_VALUES) * len(NU_VALUES)
+print(f"\nAspect-ratio × Poisson sweep — Traditional Consolidation (laterally drained)")
+print(f"  Re = {Re} m  |  t_end = {T_END:.0f} s")
+print(f"  {len(H_OVER_RE_VALUES)} ARs × {len(NU_VALUES)} nus = {n_cases} cases\n")
 
 for H_over_Re in H_OVER_RE_VALUES:
     H    = Re * H_over_Re
     H_dr = H / 2.0
-    t_end = T_END
+    for nu in NU_VALUES:
+        label = _label(H_over_Re, nu)
+        cv    = _cv(nu)
+        print(f"  {label:<22}  H={H:.4g} m  nu={nu}  cv={cv:.3e} m²/s")
 
-    label = f"ar_{H_over_Re:.2f}"
-    print(f"  {label:<12}  H={H:.4g} m  H_dr={H_dr:.4g} m  t_end={t_end:.3g} s")
+        if args.dry_run:
+            continue
 
-    if args.dry_run:
-        continue
-
-    run_dir = RUNS_DIR / label
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "config.yaml").write_text(_make_config(label, H_over_Re))
+        run_dir = RUNS_DIR / label
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "config.yaml").write_text(_make_config(label, H_over_Re, nu))
 
 if args.dry_run:
     print(f"\n--dry-run: no files written.")
 else:
-    print(f"\nGenerated {len(H_OVER_RE_VALUES)} cases in {RUNS_DIR}/")
+    print(f"\nGenerated {n_cases} cases in {RUNS_DIR}/")

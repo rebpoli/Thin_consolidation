@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Aspect-ratio sweep post-processing for conventional consolidation.
+"""Aspect-ratio × Poisson sweep post-processing.
 
-Produces one plot per figure with paper-style formatting.
+Each plot draws one line per Poisson ratio.
+  - Error figures: x = aspect ratio, one curve per nu.
+  - Timeseries figures: small-multiples grid with one subplot per AR,
+    four curves (one per nu) inside each subplot.
 """
 import argparse
 import matplotlib
@@ -16,7 +19,32 @@ from pathlib import Path
 DEMO_DIR = Path(__file__).resolve().parents[1]
 RUNS_DIR = DEMO_DIR / "runs"
 
-H_OVER_RE_VALUES = [0.01, 0.02, 0.05, 0.10, 0.20, 0.50, 1.00, 2.00, 5.00, 10.00]
+import re
+
+_LABEL_RE = re.compile(r"^ar_(?P<ar>[0-9.]+)__nu_(?P<nu>[0-9.]+)$")
+
+
+def _discover_cases():
+    """Discover (h_over_re, nu) → dir-name from runs/ with completed output."""
+    found = {}
+    if RUNS_DIR.exists():
+        for d in RUNS_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            m = _LABEL_RE.match(d.name)
+            if not m or not (d / "outputs" / "fem_timeseries.nc").exists():
+                continue
+            found[(float(m["ar"]), float(m["nu"]))] = d.name
+    h_vals  = sorted({h for h, _ in found})
+    nu_vals = sorted({n for _, n in found})
+    return h_vals, nu_vals, found
+
+
+H_OVER_RE_VALUES, NU_VALUES, _CASE_DIRS = _discover_cases()
+if not H_OVER_RE_VALUES:
+    raise FileNotFoundError(
+        f"No completed runs found in {RUNS_DIR}. Run `make run` first."
+    )
 
 MM = 1 / 25.4
 FIG_W_MM = 90
@@ -82,112 +110,125 @@ def _aspect_ratio(h_over_re):
     return 2.0 / h_over_re
 
 
-# Load datasets
+def _label(h_over_re, nu):
+    return _CASE_DIRS.get((h_over_re, nu), f"ar_{h_over_re:.4f}__nu_{nu:.2f}")
+
+
+# ── Load datasets: datasets[(ar, nu)] = xr.Dataset ────────────────────────────
 datasets = {}
 for ar in H_OVER_RE_VALUES:
-    label = f"ar_{ar:.2f}"
-    nc = RUNS_DIR / label / "outputs" / "fem_timeseries.nc"
-    if nc.exists():
-        try:
-            datasets[ar] = xr.open_dataset(nc)
-        except Exception as e:
-            print(f"  Warning: {label}: {e}")
+    for nu in NU_VALUES:
+        nc = RUNS_DIR / _label(ar, nu) / "outputs" / "fem_timeseries.nc"
+        if nc.exists():
+            try:
+                datasets[(ar, nu)] = xr.open_dataset(nc)
+            except Exception as e:
+                print(f"  Warning: {_label(ar, nu)}: {e}")
 
 if not datasets:
     raise FileNotFoundError(f"No output files found under {RUNS_DIR}. Run make run first.")
 
-print(f"Loaded {len(datasets)}/{len(H_OVER_RE_VALUES)} cases.")
+print(f"Loaded {len(datasets)}/{len(H_OVER_RE_VALUES)*len(NU_VALUES)} cases.")
 
-palette = cm.viridis(np.linspace(0.1, 0.9, len(H_OVER_RE_VALUES)))
-color_map = {ar: palette[i] for i, ar in enumerate(H_OVER_RE_VALUES)}
+nu_palette = cm.coolwarm(np.linspace(0.0, 1.0, len(NU_VALUES)))
+nu_color   = {nu: nu_palette[i] for i, nu in enumerate(NU_VALUES)}
 
 png_dir = DEMO_DIR / "png"
 png_dir.mkdir(exist_ok=True)
 
-# Figure: pressure time series
-fig_p, ax_p = _new_fig()
-for ar, ds in sorted(datasets.items()):
-    t = ds["time"].values
-    mk = t > 0
-    if args.max_time is not None:
-        mk &= t <= args.max_time
-    t_plot = t[mk]
-    if t_plot.size == 0 or "pressure_mean" not in ds:
-        continue
-    p = np.clip(ds["pressure_mean"].values[mk] / 1e3, 1e-3, None)
-    ax_p.plot(t_plot, p, color=color_map[ar], label=f"AR={_aspect_ratio(ar):g}")
-    if "pressure_p10" in ds and "pressure_p90" in ds:
-        p10 = np.clip(ds["pressure_p10"].values[mk] / 1e3, 1e-3, None)
-        p90 = np.clip(ds["pressure_p90"].values[mk] / 1e3, 1e-3, None)
-        ax_p.fill_between(t_plot, p10, p90, color=color_map[ar], alpha=0.15, linewidth=0)
 
-_fmt_log_decimal_axis(ax_p)
-ax_p.set_yscale("log")
-ax_p.set_xlabel("Time (s)")
-ax_p.set_ylabel("Mean excess pressure (kPa)")
-ax_p.grid(True, which="both", alpha=0.25, zorder=0)
-leg_p = ax_p.legend(loc="upper right", ncol=2, **LEGEND_STYLE)
-leg_p.get_frame().set_linewidth(0.3)
-_save(fig_p, png_dir / "ar_pressure_timeseries.png")
+# ── Timeseries: small multiples (one subplot per AR, 4 nu curves each) ────────
+def _plot_timeseries_grid(var, scale, ylabel, out_name, *, ylog=False, neg=False):
+    n_ar = len(H_OVER_RE_VALUES)
+    ncol = 5
+    nrow = (n_ar + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol,
+                             figsize=(FIG_W_MM * MM * 1.8, FIG_H_MM * MM * nrow * 0.9),
+                             sharex=True, sharey=True)
+    axes = np.atleast_2d(axes).ravel()
 
-# Figure: settlement time series
-fig_u, ax_u = _new_fig()
-for ar, ds in sorted(datasets.items()):
-    t = ds["time"].values
-    mk = t > 0
-    if args.max_time is not None:
-        mk &= t <= args.max_time
-    t_plot = t[mk]
-    if t_plot.size == 0 or "uz_at_top" not in ds:
-        continue
-    uz = -ds["uz_at_top"].values[mk] * 1e6
-    ax_u.plot(t_plot, uz, color=color_map[ar], label=f"AR={_aspect_ratio(ar):g}")
+    for i, ar in enumerate(H_OVER_RE_VALUES):
+        ax = axes[i]
+        for nu in NU_VALUES:
+            ds = datasets.get((ar, nu))
+            if ds is None or var not in ds:
+                continue
+            t = ds["time"].values
+            mk = t > 0
+            if args.max_time is not None:
+                mk &= t <= args.max_time
+            t_plot = t[mk]
+            if t_plot.size == 0:
+                continue
+            y = ds[var].values[mk] * scale
+            if neg:
+                y = -y
+            if ylog:
+                y = np.clip(y, 1e-3, None)
+            ax.plot(t_plot, y, color=nu_color[nu], label=f"ν={nu:g}")
+        _fmt_log_decimal_axis(ax)
+        if ylog:
+            ax.set_yscale("log")
+        ax.set_title(f"AR={_aspect_ratio(ar):g}", fontsize=6)
+        ax.grid(True, which="both", alpha=0.25, zorder=0)
 
-_fmt_log_decimal_axis(ax_u)
-ax_u.set_xlabel("Time (s)")
-ax_u.set_ylabel("Settlement (-u_z) (um)")
-ax_u.grid(True, which="both", alpha=0.25, zorder=0)
-leg_u = ax_u.legend(loc="best", ncol=2, **LEGEND_STYLE)
-leg_u.get_frame().set_linewidth(0.3)
-_save(fig_u, png_dir / "ar_settlement_timeseries.png")
+    for j in range(len(H_OVER_RE_VALUES), len(axes)):
+        axes[j].set_visible(False)
 
-# Final errors vs aspect ratio (one plot per figure)
-ar_vals = []
-p_errs = []
-u_errs = []
-v_errs = []
-for h_over_re, ds in sorted(datasets.items()):
-    ar_vals.append(_aspect_ratio(h_over_re))
-    p_errs.append(float(ds["pressure_error_percent"].values[-1]))
-    u_errs.append(float(ds["uz_error_percent"].values[-1]))
-    v_errs.append(float(ds["volume_error_percent"].values[-1]))
+    for ax in axes[-ncol:]:
+        ax.set_xlabel("Time (s)")
+    for r in range(nrow):
+        axes[r * ncol].set_ylabel(ylabel)
 
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        leg = fig.legend(handles, labels, loc="upper center",
+                         ncol=len(NU_VALUES), bbox_to_anchor=(0.5, 1.02), **LEGEND_STYLE)
+        leg.get_frame().set_linewidth(0.3)
 
-def _plot_error(values, ylabel, out_name):
-    fig, ax = _new_fig()
-    ax.plot(ar_vals, values, color="black", linestyle="-")
-    _fmt_log_decimal_axis(ax)
-    ax.set_xlim(2, 100)
-    ax.margins(x=0)
-    ax.set_ylim(0, 100)
-    ax.set_xlabel("Aspect Ratio (diameter/height)")
-    ax.set_ylabel(ylabel)
-    ax.grid(True, which="both", alpha=0.25, zorder=0)
-
-    # Set specific x-axis ticks and labels
-    ax.set_xticks([2, 4, 10, 50, 100])
-    ax.set_xticklabels(["2", "4", "10", "50", "100"])
-
-    # Mark regime boundaries
-    ax.axvspan(2, 4, color="gray", alpha=0.25, zorder=0)
-    ax.axvline(4, color="k", linestyle="--", linewidth=0.5, alpha=1, zorder=1)
-    ax.annotate("1D consolidation", xy=(3.95, 97.5), xytext=(0, -5), textcoords="offset points",
-                fontsize=5, ha="right", va="top", style="italic", alpha=1, rotation=90)
-    ax.text(4.5, 97.5, "Thin disc test", fontsize=5, ha="left", va="top", style="italic", alpha=1)
-
+    fig.tight_layout()
     _save(fig, png_dir / out_name)
 
 
-_plot_error(p_errs, "Pressure error (%)", "ar_pressure_error.png")
-_plot_error(u_errs, "Displacement error (%)", "ar_displacement_error.png")
-_plot_error(v_errs, "Volume error (%)", "ar_volume_error.png")
+_plot_timeseries_grid("pressure_mean", 1 / 1e3,
+                      "Mean p (kPa)", "ar_pressure_timeseries.png", ylog=True)
+_plot_timeseries_grid("uz_at_top", 1e6,
+                      "Settlement (-u_z) (μm)", "ar_settlement_timeseries.png", neg=True)
+
+
+# ── Error vs AR: one line per nu ──────────────────────────────────────────────
+def _plot_error(var, ylabel, out_name):
+    fig, ax = _new_fig()
+    for nu in NU_VALUES:
+        ar_vals, errs = [], []
+        for h_over_re in H_OVER_RE_VALUES:
+            ds = datasets.get((h_over_re, nu))
+            if ds is None or var not in ds:
+                continue
+            ar_vals.append(_aspect_ratio(h_over_re))
+            errs.append(float(ds[var].values[-1]))
+        if not ar_vals:
+            continue
+        order = np.argsort(ar_vals)
+        ar_vals = np.asarray(ar_vals)[order]
+        errs    = np.asarray(errs)[order]
+        ax.plot(ar_vals, errs, color=nu_color[nu], label=f"ν={nu:g}")
+
+    _fmt_log_decimal_axis(ax)
+    ax.set_xlim(4, 50)
+    ax.margins(x=0)
+    ax.set_ylim(0, 40)
+    ax.set_xlabel("Aspect Ratio (diameter/height)")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, which="both", alpha=0.25, zorder=0)
+    ax.set_xticks([4, 10, 50])
+    ax.set_xticklabels(["4", "10", "50"])
+
+    leg = ax.legend(loc="upper right", **LEGEND_STYLE)
+    leg.get_frame().set_linewidth(0.3)
+    _save(fig, png_dir / out_name)
+
+
+_plot_error("pressure_error_percent",   "Pressure error (%)",     "ar_pressure_error.png")
+_plot_error("uz_error_percent",         "Displacement error (%)", "ar_displacement_error.png")
+_plot_error("volume_error_percent",     "Volume error (%)",       "ar_volume_error.png")
